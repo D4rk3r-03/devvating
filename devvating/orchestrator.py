@@ -1,0 +1,235 @@
+"""Motor de debate (M2: N rondas con reglas de convergencia).
+
+Flujo (DISENO.md sección 3, decisiones D3/D4):
+  Apertura a ciegas: ambos agentes proponen en paralelo, sin verse.
+  Rondas 1..N (tope configurable, por defecto 2): cada agente responde a la
+    postura del otro (refina o mantiene) y emite un veredicto de convergencia.
+    - Corte temprano: si ambos declaran convergencia en la misma ronda, se para.
+    - Entre rondas el vocero puede intervenir (D4) vía on_intervention.
+  Ronda de inversión (modo profundo, opt-in, D3): cada uno defiende la postura
+    contraria como stress-test.
+  Síntesis: un agente (rotativo) reporta acuerdos, desacuerdos y plan.
+
+Todo en SOLO LECTURA: los agentes solo disponen de read_file.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Callable
+
+from . import roles
+from .adapters.base import AgentAdapter, TurnUsage
+from .tools.readonly import make_read_file
+from .tools.registry import ToolRegistry
+
+_VERDICT_RE = re.compile(r"\[\s*CONVERGENCIA\s*:\s*(S[IÍ]|NO)\s*\]", re.IGNORECASE)
+
+
+def _parse_verdict(text: str) -> tuple[str, str | None]:
+    """Extrae el veredicto de convergencia y lo quita del texto mostrado."""
+    match = _VERDICT_RE.search(text)
+    if not match:
+        return text.strip(), None
+    verdict = "si" if match.group(1).upper() in ("SI", "SÍ") else "no"
+    clean = _VERDICT_RE.sub("", text).strip()
+    return clean, verdict
+
+
+@dataclass
+class DebateTopic:
+    prompt: str
+    context_hint: str = ""
+
+
+@dataclass
+class Turn:
+    round: int  # 0 = apertura a ciegas
+    phase: str  # "propuesta" | "replica" | "inversion" | "sintesis"
+    agent: str
+    text: str
+    verdict: str | None = None  # "si" | "no" | None
+    usage: TurnUsage | None = None  # métricas del turno (§13); None si no hay
+
+
+@dataclass
+class DebateSession:
+    topic: DebateTopic
+    turns: list[Turn] = field(default_factory=list)
+    rounds_run: int = 0
+    converged: bool = False
+    converged_round: int | None = None
+    deep_mode: bool = False
+    synthesis: str = ""
+    synthesizer: str = ""
+    # Totales por agente + "total" global, derivados de turns al final (§13).
+    usage_totals: dict[str, TurnUsage] = field(default_factory=dict)
+
+
+# Callbacks opcionales:
+#   on_event(evento, agente, texto|None)  -> reportar progreso a la UI
+#   on_intervention(ronda) -> nota del vocero para esa ronda, o None
+EventCb = Callable[[str, str, str | None], None]
+InterventionCb = Callable[[int], str | None]
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        agent_a: AgentAdapter,
+        agent_b: AgentAdapter,
+        repo_root: str = ".",
+        on_event: EventCb | None = None,
+    ) -> None:
+        self.agents = [agent_a, agent_b]
+        self.repo_root = repo_root
+        self._on_event = on_event or (lambda *_: None)
+
+    def _registry(self) -> ToolRegistry:
+        # Solo lectura durante el debate (nadie puede escribir ni ejecutar).
+        reg = ToolRegistry()
+        reg.register(make_read_file(self.repo_root))
+        return reg
+
+    def _other(self, agent: AgentAdapter) -> AgentAdapter:
+        return self.agents[1] if agent is self.agents[0] else self.agents[0]
+
+    def run(
+        self,
+        topic: DebateTopic,
+        *,
+        max_rounds: int = 2,
+        synthesizer_index: int = 0,
+        deep_mode: bool = False,
+        on_intervention: InterventionCb | None = None,
+    ) -> DebateSession:
+        session = DebateSession(topic=topic, deep_mode=deep_mode)
+        registry = self._registry()
+
+        # --- Apertura a ciegas (ronda 0) ------------------------------------
+        self._on_event("ronda", "apertura a ciegas", None)
+        positions: dict[str, str] = {}
+        for agent in self.agents:
+            self._on_event("propuesta_inicio", agent.name, None)
+            text = agent.converse(roles.PROPONENTE, roles.prompt_propuesta(topic), registry)
+            positions[agent.name] = text
+            session.turns.append(
+                Turn(0, "propuesta", agent.name, text, usage=self._usage_de(agent))
+            )
+            self._on_event("propuesta_fin", agent.name, text)
+
+        # --- Rondas de réplica con reglas de convergencia -------------------
+        for r in range(1, max_rounds + 1):
+            session.rounds_run = r
+            self._on_event("ronda", f"ronda {r}", None)
+            nota = on_intervention(r) if on_intervention else None
+
+            # Ambos replican a la postura del otro de la ronda anterior
+            # (se actualiza después del bucle -> réplicas simultáneas, sin sesgo).
+            new_positions: dict[str, str] = {}
+            verdicts: dict[str, str | None] = {}
+            for agent in self.agents:
+                other = self._other(agent)
+                self._on_event("replica_inicio", agent.name, None)
+                raw = agent.converse(
+                    roles.REPLICA,
+                    roles.prompt_replica(
+                        topic, positions[agent.name], positions[other.name], other.name, nota
+                    ),
+                    registry,
+                )
+                clean, verdict = _parse_verdict(raw)
+                new_positions[agent.name] = clean
+                verdicts[agent.name] = verdict
+                session.turns.append(
+                    Turn(r, "replica", agent.name, clean, verdict, usage=self._usage_de(agent))
+                )
+                self._on_event("replica_fin", agent.name, clean)
+
+            positions = new_positions
+            if all(v == "si" for v in verdicts.values()):
+                session.converged = True
+                session.converged_round = r
+                self._on_event("convergencia", f"ronda {r}", None)
+                break
+
+        # --- Ronda de inversión (modo profundo, opt-in) ---------------------
+        if deep_mode:
+            self._on_event("ronda", "inversión (modo profundo)", None)
+            for agent in self.agents:
+                other = self._other(agent)
+                self._on_event("inversion_inicio", agent.name, None)
+                text = agent.converse(
+                    roles.INVERSION,
+                    roles.prompt_inversion(
+                        topic, positions[agent.name], positions[other.name], other.name
+                    ),
+                    registry,
+                )
+                session.turns.append(
+                    Turn(session.rounds_run, "inversion", agent.name, text,
+                         usage=self._usage_de(agent))
+                )
+                self._on_event("inversion_fin", agent.name, text)
+
+        # --- Síntesis (agente rotativo) -------------------------------------
+        synth = self.agents[synthesizer_index % len(self.agents)]
+        self._on_event("ronda", "síntesis", None)
+        self._on_event("sintesis_inicio", synth.name, None)
+        nota_conv = (
+            f"Los agentes CONVERGIERON en la ronda {session.converged_round}."
+            if session.converged
+            else f"NO hubo convergencia tras {session.rounds_run} ronda(s); "
+            "reporta explícitamente los desacuerdos abiertos."
+        )
+        text = synth.converse(
+            roles.SINTETIZADOR,
+            roles.prompt_sintesis(topic, self._transcript_text(session), nota_conv),
+            registry,
+        )
+        session.synthesis = text
+        session.synthesizer = synth.name
+        session.turns.append(
+            Turn(session.rounds_run, "sintesis", synth.name, text, usage=self._usage_de(synth))
+        )
+        self._on_event("sintesis_fin", synth.name, text)
+
+        session.usage_totals = self._totalizar(session)
+        return session
+
+    @staticmethod
+    def _usage_de(agent: AgentAdapter) -> TurnUsage | None:
+        """Copia el uso del último turno del adaptador (accessor del plan §13)."""
+        return getattr(agent, "last_usage", None)
+
+    @staticmethod
+    def _totalizar(session: DebateSession) -> dict[str, TurnUsage]:
+        """Totales por agente + global. Turnos sin métricas simplemente no suman."""
+        por_agente: dict[str, TurnUsage] = {}
+        for t in session.turns:
+            if t.usage is None:
+                continue
+            por_agente[t.agent] = por_agente.get(t.agent, TurnUsage()) + t.usage
+        if por_agente:
+            total = TurnUsage()
+            for u in por_agente.values():
+                total = total + u
+            por_agente["total"] = total
+        return por_agente
+
+    @staticmethod
+    def _transcript_text(session: DebateSession) -> str:
+        """Arma una transcripción legible del debate para la síntesis."""
+        lines: list[str] = []
+        for t in session.turns:
+            if t.phase == "sintesis":
+                continue
+            etiqueta = {
+                "propuesta": "Propuesta inicial",
+                "replica": f"Réplica (ronda {t.round})",
+                "inversion": "Inversión (steelman)",
+            }.get(t.phase, t.phase)
+            marca = f" [veredicto: {t.verdict}]" if t.verdict else ""
+            lines.append(f"— {etiqueta} · {t.agent}{marca}:\n{t.text}\n")
+        return "\n".join(lines)

@@ -1,0 +1,127 @@
+"""M3 — Ejecución del plan aprobado desde la consola.
+
+Uso:
+    # Plan desde la síntesis de un debate:
+    python -m devvating.ejecutar --repo /ruta/proyecto --from-transcript transcripts/xxx.json
+
+    # Plan desde un archivo de texto/markdown:
+    python -m devvating.ejecutar --repo /ruta/proyecto --plan-file plan.md
+
+Opciones:
+    --branch NOMBRE     Nombre de la rama (por defecto devvating/<slug>-<fecha>).
+    --allow-commands    Permite al ejecutor correr comandos (Bash). PELIGROSO.
+    --yes               Omite la confirmación de aprobación (fase 3).
+
+Flujo: muestra el plan → el vocero aprueba → crea rama → ejecuta headless →
+muestra el diff. Nada se confirma (commit) automáticamente.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.syntax import Syntax
+
+from .executor import ClaudeCodeBackend, Executor, ExecutionPlan, ExecutorError
+
+
+def _load_plan(args: argparse.Namespace) -> ExecutionPlan:
+    if args.from_transcript:
+        data = json.loads(Path(args.from_transcript).read_text(encoding="utf-8"))
+        text = data.get("synthesis", "").strip()
+        if not text:
+            raise ExecutorError("El transcript no contiene una síntesis.")
+        title = data.get("topic", {}).get("prompt", "plan")
+        return ExecutionPlan(text=text, title=title)
+    if args.plan_file:
+        return ExecutionPlan(
+            text=Path(args.plan_file).read_text(encoding="utf-8").strip(),
+            title=Path(args.plan_file).stem,
+        )
+    raise ExecutorError("Indica --from-transcript o --plan-file.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="devvating ejecutar", description="Ejecuta un plan aprobado.")
+    parser.add_argument("--repo", required=True, help="Raíz del repositorio git objetivo.")
+    parser.add_argument("--from-transcript", help="Transcript de debate (usa su síntesis).")
+    parser.add_argument("--plan-file", help="Archivo de texto/markdown con el plan.")
+    parser.add_argument("--branch", help="Nombre de la rama a crear.")
+    parser.add_argument(
+        "--allow-commands",
+        action="store_true",
+        help="Permite ejecutar comandos (Bash). Salta permisos — PELIGROSO.",
+    )
+    parser.add_argument("--yes", action="store_true", help="Omite la confirmación.")
+    args = parser.parse_args(argv)
+
+    console = Console()
+
+    try:
+        plan = _load_plan(args)
+    except (ExecutorError, OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]No se pudo cargar el plan: {exc}[/red]")
+        return 1
+
+    console.rule("[bold]DEVVATING · Ejecución (M3)")
+    console.print(Panel(Markdown(plan.text), title="[green]Plan a ejecutar", border_style="green"))
+
+    # Fase 3 — arbitraje del vocero.
+    if args.allow_commands:
+        console.print(
+            "[bold red]⚠ --allow-commands: el ejecutor podrá correr comandos "
+            "arbitrarios (saltando permisos). Se corre en una rama, pero revisa "
+            "el diff con cuidado.[/bold red]"
+        )
+    if not args.yes:
+        resp = console.input(
+            "[bold yellow]Vocero[/bold yellow] · ¿Aprobar y ejecutar este plan? (y/N): "
+        ).strip().lower()
+        if resp not in ("y", "s", "yes", "si", "sí"):
+            console.print("Cancelado por el vocero.")
+            return 0
+
+    backend = ClaudeCodeBackend()
+    executor = Executor(
+        args.repo,
+        backend,
+        on_event=lambda ev, val: console.print(f"[dim]· {ev}: {val}[/dim]"),
+    )
+
+    try:
+        outcome = executor.execute(
+            plan, allow_commands=args.allow_commands, branch=args.branch
+        )
+    except ExecutorError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+
+    console.rule(f"[bold]Resultado · rama {outcome.branch}")
+    if outcome.returncode != 0:
+        console.print(f"[yellow]El backend salió con código {outcome.returncode}.[/yellow]")
+
+    if not outcome.changed_files:
+        console.print("[yellow]El ejecutor no produjo cambios.[/yellow]")
+    else:
+        console.print(f"[bold]Archivos cambiados ({len(outcome.changed_files)}):[/bold]")
+        for f in outcome.changed_files:
+            console.print(f"  • {f}")
+        console.print("\n[bold]Diff:[/bold]")
+        console.print(Syntax(outcome.diff, "diff", theme="ansi_dark", word_wrap=True))
+
+    console.print(
+        f"\n[bold]Vocero:[/bold] revisa el diff en la rama [cyan]{outcome.branch}[/cyan]. "
+        "Para conservar: `git commit`. Para descartar: vuelve a tu rama y "
+        f"`git branch -D {outcome.branch}`."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,8 @@
+{
+  "rounds": 2,
+  "deep_mode": false,
+  "auto_rotate": true,
+  "repo": ".",
+  "files": "",
+  "backends": { "claude": "api", "gemini": "api" }
+}

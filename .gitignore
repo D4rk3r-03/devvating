@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+transcripts/
+.devvating/
+*.egg-info/
+
+# Archivos de trabajo del asistente (no se publican)
+CLAUDE.md
+.claude/
