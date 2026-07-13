@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 CONFIG_FILE = ".devvating.json"
 
@@ -32,6 +32,9 @@ class ProjectConfig:
     # créditos) o "cli" (agente headless, cubierto por suscripción).
     claude_backend: str = "api"
     gemini_backend: str = "api"
+    # D7 (M8): par de debatientes por nombre de roster (p. ej.
+    # ["antigravity", "claude-cli"]). Vacío = usar el par clásico de D5.
+    agentes: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, start: str = ".") -> "ProjectConfig":
@@ -42,6 +45,8 @@ class ProjectConfig:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
             backends = data.get("backends") or {}
+            crudos = data.get("agentes") or []
+            agentes = [str(a) for a in crudos if isinstance(a, str)] if isinstance(crudos, list) else []
             return cls(
                 rounds=int(data.get("rounds", 2)),
                 deep_mode=bool(data.get("deep_mode", False)),
@@ -50,6 +55,7 @@ class ProjectConfig:
                 files=str(data.get("files", "")),
                 claude_backend=_backend(backends.get("claude", "api")),
                 gemini_backend=_backend(backends.get("gemini", "api")),
+                agentes=agentes,
             )
         except (OSError, ValueError, TypeError, AttributeError):
             return cls()

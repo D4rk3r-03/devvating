@@ -78,6 +78,7 @@ resumen de tokens y costo por agente, y guarda el transcript JSON completo en
 | `--synthesizer claude\|gemini\|auto` | Quién escribe la síntesis (`auto` rota) |
 | `--claude-backend api\|cli` | Claude vía SDK (créditos API) o `claude -p` (suscripción) |
 | `--gemini-backend api\|cli` | Gemini vía SDK o `gemini -p` (suscripción) |
+| `--agentes a,b` | Cualquier par del roster: `claude-api`, `claude-cli`, `gemini-api`, `gemini-cli`, `antigravity` (el `agy` de Google), `kimi` |
 
 > 💡 **Combinación de costo cero**: `--claude-backend cli` (suscripción
 > Claude Pro/Max) + Gemini en el tier gratuito de la API corre el pipeline

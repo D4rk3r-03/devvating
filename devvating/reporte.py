@@ -16,7 +16,12 @@ from pathlib import Path
 
 import markdown as _markdown
 
-_COLORES = {"claude": "#0e7490", "gemini": "#a21caf"}
+_COLORES = {
+    "claude": "#0e7490",
+    "gemini": "#a21caf",
+    "antigravity": "#1d4ed8",
+    "kimi": "#15803d",
+}
 _COLOR_DEFECTO = "#52525b"
 
 _FASES = {

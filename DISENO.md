@@ -398,6 +398,26 @@ Decidido tras un debate profundo de la propia herramienta sobre su interfaz
   (FastAPI + websockets) que reutiliza el renderizador de turnos del reporte
   como view y el flujo de `on_event` como fuente de los websockets.
 
+### D7 — Banco de agentes plugable (2026-07-13)
+
+Motivo (diagnóstico del vocero, con evidencia en transcripts): un modelo
+pequeño debatiendo contra uno grande no debate — defiere. La asimetría
+flash-lite vs Opus producía adulación y socavaba el valor adversarial. La
+solución estructural no es coronar a un lado sino **nivelar el banco**:
+
+- `agentes.py`: roster nombre→fábrica (`claude-api`, `claude-cli`,
+  `gemini-api`, `gemini-cli`, `antigravity`, `kimi`; alias `agy`). El par se
+  elige con `--agentes a,b`, con `"agentes": [...]` en `.devvating.json`, o
+  cae al par clásico de D5. Validación: exactamente 2, identidades distintas.
+- Nuevos adaptadores sobre `PlainCliAdapter`: **Antigravity** (`agy -p`, usa
+  el modelo default del CLI — p. ej. Gemini 3.1 Pro — o `--model`) y **Kimi**
+  (`kimi -p --output-format text`, diversidad de familia de modelos).
+- `--synthesizer` acepta ahora el nombre de cualquier agente del par.
+- `env_suscripcion()` ampliada: también quita `GEMINI_API_KEY`,
+  `GOOGLE_API_KEY` y `GOOGLE_CLOUD_PROJECT` — trampa gemela a la de
+  Anthropic: el CLI de Google desvía la facturación al proyecto/clave
+  heredados (verificado en real: agy atado a un proyecto GCP sin billing).
+
 ## 12. Preguntas abiertas (para decidir antes de M0)
 
 Ninguna bloqueante. Las decisiones D1–D4 dejan M0 listo para empezar.

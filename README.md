@@ -78,6 +78,7 @@ a per-agent token & cost summary, and saves a full JSON transcript under
 | `--synthesizer claude\|gemini\|auto` | Who writes the synthesis (`auto` rotates) |
 | `--claude-backend api\|cli` | Claude via SDK (API credits) or `claude -p` (subscription) |
 | `--gemini-backend api\|cli` | Gemini via SDK or `gemini -p` (subscription) |
+| `--agentes a,b` | Pick any two debaters from the roster: `claude-api`, `claude-cli`, `gemini-api`, `gemini-cli`, `antigravity` (Google's `agy`), `kimi` |
 
 > 💡 **Zero-marginal-cost combo**: `--claude-backend cli` (Claude Pro/Max
 > subscription) + Gemini on the API free tier runs the whole pipeline without

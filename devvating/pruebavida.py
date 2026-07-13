@@ -43,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("archivo", nargs="?", default="DISENO.md")
     parser.add_argument("--claude-backend", choices=["api", "cli"], default=None)
     parser.add_argument("--gemini-backend", choices=["api", "cli"], default=None)
+    parser.add_argument(
+        "--agentes", default=None,
+        help="Agentes del roster a probar, separados por coma (D7). Ej: antigravity,kimi",
+    )
     args = parser.parse_args(argv)
 
     console = Console()
@@ -59,16 +63,21 @@ def main(argv: list[str] | None = None) -> int:
     registry = build_registry(cfg)
 
     # Import aquí para evitar coste al ayudar (--help) y mantener el módulo liviano.
-    from .debate import make_agent
+    from . import agentes as banco
 
-    for provider, backend in (("claude", claude_backend), ("gemini", gemini_backend)):
-        console.rule(f"[bold]{provider} · backend {backend}")
+    if args.agentes:
+        objetivos = [n.strip() for n in args.agentes.split(",") if n.strip()]
+    else:
+        objetivos = [f"claude-{claude_backend}", f"gemini-{gemini_backend}"]
+
+    for nombre in objetivos:
+        console.rule(f"[bold]{nombre}")
         try:
-            adapter = make_agent(provider, backend, cfg, cfg.repo_root)
+            adapter = banco.crear(nombre, cfg, cfg.repo_root)
             answer = adapter.converse(SYSTEM, prompt, registry)
             console.print(answer)
         except Exception as exc:  # noqa: BLE001 — prueba de vida: mostrar el fallo.
-            console.print(f"[red]Fallo con {provider} ({backend}): {exc}[/red]")
+            console.print(f"[red]Fallo con {nombre}: {exc}[/red]")
 
     return 0
 

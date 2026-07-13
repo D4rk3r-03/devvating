@@ -23,16 +23,14 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
+from . import agentes as banco
 from . import rotation
 from .adapters.base import AgentAdapter
-from .adapters.claude import ClaudeAdapter
-from .adapters.cli import ClaudeCliAdapter, GeminiCliAdapter
-from .adapters.gemini import GeminiAdapter
 from .appconfig import ProjectConfig
 from .config import Config
 from .orchestrator import DebateSession, DebateTopic, Orchestrator
 
-_COLORS = {"claude": "cyan", "gemini": "magenta"}
+_COLORS = {"claude": "cyan", "gemini": "magenta", "antigravity": "blue", "kimi": "green"}
 
 
 def _save_transcript(session: DebateSession, repo_root: str) -> Path:
@@ -48,19 +46,8 @@ def _save_transcript(session: DebateSession, repo_root: str) -> Path:
 
 
 def make_agent(provider: str, backend: str, cfg: Config, repo: str) -> AgentAdapter:
-    """Fábrica de agentes (D5): API con SDK o CLI headless, por proveedor.
-
-    Solo exige la clave API cuando el backend realmente la usa.
-    """
-    if provider == "claude":
-        if backend == "cli":
-            return ClaudeCliAdapter(cwd=repo)
-        cfg.require_anthropic()
-        return ClaudeAdapter(cfg.anthropic_api_key, cfg.claude_model, cfg.max_tool_iterations)
-    if backend == "cli":
-        return GeminiCliAdapter(cwd=repo)
-    cfg.require_gemini()
-    return GeminiAdapter(cfg.gemini_api_key, cfg.gemini_model, cfg.max_tool_iterations)
+    """Compatibilidad D5: par clásico proveedor+backend, resuelto vía roster."""
+    return banco.crear(f"{provider}-{backend}", cfg, repo)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,9 +58,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rounds", type=int, default=None, help="Tope de rondas de réplica.")
     parser.add_argument(
         "--synthesizer",
-        choices=["claude", "gemini", "auto"],
         default="auto",
-        help="Quién sintetiza. 'auto' rota entre debates.",
+        help="Quién sintetiza: nombre de agente del par, o 'auto' (rota entre debates).",
+    )
+    parser.add_argument(
+        "--agentes",
+        default=None,
+        help=(
+            "Par de debatientes del roster, separados por coma (D7). "
+            f"Roster: {', '.join(banco.nombres())}. Ej: --agentes antigravity,claude-cli"
+        ),
     )
     parser.add_argument("--profundo", action="store_true", help="Ronda de inversión (~2x coste).")
     parser.add_argument("--interactivo", action="store_true", help="Nota del vocero por ronda.")
@@ -99,18 +93,34 @@ def main(argv: list[str] | None = None) -> int:
     claude_backend = args.claude_backend or pc.claude_backend
     gemini_backend = args.gemini_backend or pc.gemini_backend
 
+    # Par de debatientes (D7): --agentes > config > par clásico D5.
+    if args.agentes:
+        nombres_par = [n.strip() for n in args.agentes.split(",") if n.strip()]
+    elif pc.agentes:
+        nombres_par = pc.agentes
+    else:
+        nombres_par = [f"claude-{claude_backend}", f"gemini-{gemini_backend}"]
+    try:
+        agente_a, agente_b = banco.par(nombres_par, cfg, repo)
+    except (ValueError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+
     # Resolución del sintetizador (rotación automática, D3 capa 1).
     auto_rotate = args.synthesizer == "auto" and pc.auto_rotate
     if auto_rotate:
         state = rotation.load(repo)
         synth_index = state.synthesizer_index()
-    elif args.synthesizer == "gemini":
+    elif args.synthesizer == agente_b.name:
         synth_index = 1
-    else:  # claude, o auto con rotación desactivada
-        synth_index = 0
-
-    claude = make_agent("claude", claude_backend, cfg, repo)
-    gemini = make_agent("gemini", gemini_backend, cfg, repo)
+    elif args.synthesizer in (agente_a.name, "auto"):
+        synth_index = 0  # auto con rotación desactivada cae al primero
+    else:
+        console.print(
+            f"[red]Sintetizador '{args.synthesizer}' no está en el par: "
+            f"{agente_a.name}, {agente_b.name} (o usa 'auto').[/red]"
+        )
+        return 1
 
     # Heartbeat (M6a): spinner con agente, etapa y cronómetro durante cada
     # turno, usando los pares *_inicio/*_fin que el orquestador ya emite.
@@ -164,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         ).strip()
         return nota or None
 
-    orch = Orchestrator(claude, gemini, repo_root=repo, on_event=on_event)
+    orch = Orchestrator(agente_a, agente_b, repo_root=repo, on_event=on_event)
     topic = DebateTopic(prompt=args.tema, context_hint=files)
 
     console.rule("[bold]DEVVATING · Debate")
@@ -172,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     console.print(
         f"[dim]rondas≤{rounds} · profundo={deep} · "
         f"sintetizador={'auto' if auto_rotate else args.synthesizer} · "
-        f"backends: claude={claude_backend}, gemini={gemini_backend}[/dim]\n"
+        f"agentes: {nombres_par[0]} vs {nombres_par[1]}[/dim]\n"
     )
 
     try:

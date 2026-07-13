@@ -28,17 +28,21 @@ class CliAdapterError(RuntimeError):
 
 
 def env_suscripcion() -> dict[str, str]:
-    """Entorno para el subprocess SIN credenciales API de Anthropic.
+    """Entorno para el subprocess SIN credenciales API heredables.
 
-    Nuestro proceso carga ANTHROPIC_API_KEY desde .env para el backend api;
-    si el CLI la hereda, le da precedencia sobre el login de suscripción y
-    factura (o falla) contra la clave. Se quita para que `claude -p` use la
-    suscripción — que es la razón de ser del backend cli (D5).
+    Nuestro proceso carga las claves API desde .env para los backends api; si
+    un CLI las hereda, les da precedencia sobre su login de suscripción y
+    factura (o falla) contra la clave/proyecto. Verificado en real con
+    ANTHROPIC_API_KEY (D5) y aplica igual a las variables de Google. Se
+    quitan para que cada CLI use su propia sesión.
     """
     return {
         k: v
         for k, v in os.environ.items()
-        if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+        if k not in (
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+            "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT",
+        )
     }
 
 
@@ -111,31 +115,72 @@ class ClaudeCliAdapter:
         return str(data.get("result", "")).strip()
 
 
-class GeminiCliAdapter:
-    """Turno de debate vía Gemini CLI headless (`gemini -p`).
+class PlainCliAdapter:
+    """CLI headless de texto plano (M8): `<binary> -p "<prompt>"` → stdout.
 
-    El CLI de Gemini no tiene flag de system prompt en headless, así que las
-    instrucciones de rol se anteponen al prompt. Sus herramientas de solo
-    lectura (leer/buscar archivos) están permitidas por defecto sin
-    aprobación; nada de escritura sin modos explícitos que aquí no se pasan.
+    Para CLIs sin flag de system prompt: las instrucciones de rol se anteponen
+    al prompt. Sin escritura: no se pasan modos de auto-aprobación; en modo
+    print las herramientas que exigen confirmación quedan denegadas y las de
+    lectura funcionan. No reportan métricas por stdout (last_usage = None).
     """
 
-    def __init__(self, binary: str = "gemini", cwd: str = ".", timeout: int = 600) -> None:
-        self.name = "gemini"
+    def __init__(
+        self,
+        name: str,
+        binary: str,
+        cwd: str = ".",
+        timeout: int = 600,
+        extra_args: list[str] | None = None,
+    ) -> None:
+        self.name = name
         self.binary = binary
         self.cwd = cwd
         self.timeout = timeout
-        # El CLI de Gemini en headless no reporta métricas por stdout.
+        self.extra_args = list(extra_args or [])
         self.last_usage: TurnUsage | None = None
 
     def build_argv(self, system: str, prompt: str) -> list[str]:
         combinado = f"INSTRUCCIONES DE SISTEMA (tu rol):\n{system}\n\n{prompt}"
-        return [self.binary, "-p", combinado]
+        return [self.binary, "-p", combinado, *self.extra_args]
 
     def converse(self, system: str, prompt: str, registry: ToolRegistry) -> str:
         self.last_usage = None
-        proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout, "Gemini")
+        proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout, self.name)
         if proc.returncode != 0:
             detalle = (proc.stderr or proc.stdout).strip()[:500]
-            raise CliAdapterError(f"gemini -p salió con código {proc.returncode}: {detalle}")
+            raise CliAdapterError(
+                f"{self.binary} -p salió con código {proc.returncode}: {detalle}"
+            )
         return proc.stdout.strip()
+
+
+class GeminiCliAdapter(PlainCliAdapter):
+    """Gemini CLI headless (`gemini -p`)."""
+
+    def __init__(self, binary: str = "gemini", cwd: str = ".", timeout: int = 600) -> None:
+        super().__init__("gemini", binary, cwd, timeout)
+
+
+class AntigravityCliAdapter(PlainCliAdapter):
+    """Antigravity headless (`agy -p`), el CLI agéntico de Google.
+
+    Sin `model` usa el default configurado en el propio agy (p. ej.
+    "Gemini 3.1 Pro (High)") — el motivo de su entrada al roster (D7).
+    """
+
+    def __init__(
+        self,
+        binary: str = "agy",
+        cwd: str = ".",
+        timeout: int = 600,
+        model: str | None = None,
+    ) -> None:
+        extra = ["--model", model] if model else []
+        super().__init__("antigravity", binary, cwd, timeout, extra)
+
+
+class KimiCliAdapter(PlainCliAdapter):
+    """Kimi CLI headless (`kimi -p`), de Moonshot — diversidad de familia."""
+
+    def __init__(self, binary: str = "kimi", cwd: str = ".", timeout: int = 600) -> None:
+        super().__init__("kimi", binary, cwd, timeout, ["--output-format", "text"])
