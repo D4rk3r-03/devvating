@@ -413,5 +413,9 @@ Detalles menores a afinar durante la implementación:
   turno en el orquestador (2-3 intentos ante 429/5xx), y opcionalmente
   persistir el estado parcial del debate para reanudar. El retry del SDK de
   Gemini (tenacity) existe pero se agota; el del orquestador daría una
-  segunda capa con espera más larga.
+  segunda capa con espera más larga. **Segundo caso real (mismo día)**: el
+  backend cli de Claude devolvió "session limit reached · resets HH:MM" —
+  cuota de suscripción por ventana de tiempo. Esa clase no se cura con
+  backoff corto: requiere persistir/reanudar el debate, o al menos abortar
+  con mensaje claro de a qué hora reintentar (el JSON del CLI trae el dato).
 - TUI gráfica (Textual) — diferida de M4.
