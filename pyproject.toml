@@ -1,7 +1,7 @@
 [project]
 name = "devvating"
 version = "0.1.0"
-description = "Sala de debate multi-agente para desarrollo (Claude + Gemini)"
+description = "Multi-agent debate room for software development (Claude + Gemini)"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "D4RK3R (Luis Penagos)", email = "penagosluis95@gmail.com" }]
@@ -11,6 +11,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
     "Natural Language :: Spanish",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",

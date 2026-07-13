@@ -4,108 +4,147 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 
-Sala de debate multi-agente para desarrollo de software. Dos IAs de consola
-(Claude y Gemini) debaten un tema anclado en el código real y producen un plan;
-tú (el **vocero**) planteas el tema, arbitras y apruebas antes de ejecutar.
+**A multi-agent debate room for software development.** Two AI agents (Claude
+and Gemini) debate a topic grounded in your real codebase and produce a plan;
+you act as the *arbiter* — you frame the topic, steer the debate, and nothing
+gets executed without your explicit approval.
 
-- Diseño completo: [`DISENO.md`](./DISENO.md)
-- Protocolo operativo (flujo vocero + checklist de seguridad): [`docs/PROTOCOLO.md`](./docs/PROTOCOLO.md)
+📖 [Documentación en español](./README.es.md) · Design document (Spanish): [`DISENO.md`](./DISENO.md) · Operator guide (Spanish): [`docs/PROTOCOLO.md`](./docs/PROTOCOLO.md)
 
-## Estado
+## How it works
 
-**M0–M3 completos, M4 parcial** (roadmap en `DISENO.md` §10):
-
-| Hito | Qué cubre | Estado |
-|------|-----------|--------|
-| M0 | Andamiaje: adaptadores Claude/Gemini + bucle de tool use + `read_file` sandboxeado | ✅ |
-| M1 | Debate básico: apertura a ciegas → crítica → síntesis | ✅ |
-| M2 | Debate multi-ronda con convergencia, intervención del vocero, modo profundo | ✅ |
-| M3 | Ejecución híbrida: plan aprobado → rama git → `claude -p` headless → diff | ✅ |
-| M4 | Rotación persistente + `.devvating.json` + CLI unificada (`devvating`) | ✅ · TUI diferida |
-| M5 | Backends mixtos por agente: API (SDK) o CLI headless (suscripción) — D5 | ✅ |
-
-**Ciclo completo verificado en real el 2026-07-12**: primer debate (Claude por
-CLI de suscripción + Gemini por API, con convergencia y síntesis) y primera
-ejecución fase 4 (plan de un debate aplicado por `claude -p` en una rama,
-diff revisado y fusionado por el vocero). Todo el flujo está además cubierto
-por la suite de tests (`pytest`, stubs + git real, sin claves).
-
-## Uso
-
-```bash
-# Debate: apertura a ciegas → N rondas de réplica → síntesis.
-devvating debate "¿Conviene separar el bucle de tool use del adaptador?" \
-    --files "devvating/adapters/claude.py, devvating/adapters/gemini.py"
-
-# Opciones: --rounds N   --profundo (ronda de inversión, ~2x coste)
-#           --interactivo (notas del vocero entre rondas)
-#           --synthesizer claude|gemini|auto  (auto = rota entre debates)
-#           --claude-backend api|cli   --gemini-backend api|cli
-#             (cli = agente headless cubierto por tu suscripción; api = SDK
-#              con Tool Runtime propio, requiere créditos API)
-
-# Ejecución: aplica la síntesis aprobada en una rama del repo objetivo.
-devvating ejecutar --repo /ruta/proyecto \
-    --from-transcript transcripts/20260702-...-tema.json
+```
+1. TOPIC       you pose a debatable question about your code
+2. DEBATE      blind opening (both agents propose without seeing each other)
+               → rebuttal rounds with convergence rules → synthesis
+3. ARBITRATION the synthesis reports agreements, OPEN disagreements and a plan
+4. EXECUTION   only after your approval; on a fresh git branch; diff at the end
+5. CLOSE       you review the diff and commit — or discard the branch
 ```
 
-Los defaults (rondas, modo profundo, repo, rotación) se pueden fijar en un
-`.devvating.json` (ver `.devvating.example.json`); los flags CLI mandan.
+The debate phase is strictly **read-only**: agents can read your repository
+but never write. Execution is delegated to a headless coding agent on a
+dedicated branch, and nothing is ever committed automatically.
 
-La síntesis reporta acuerdos y **desacuerdos abiertos** para que el vocero
-decida; el transcript se guarda en `transcripts/`. En la ejecución nada se
-confirma (commit) automáticamente: revisas el diff en la rama y decides. Por
-defecto el ejecutor solo edita archivos; correr comandos requiere
-`--allow-commands` (peligroso, opt-in).
+## Requirements
 
-## Puesta en marcha
+- Python 3.11+
+- Per agent, **one** of the two backends:
+  - `api` — an API key ([Anthropic](https://console.anthropic.com) and/or [Google AI Studio](https://aistudio.google.com))
+  - `cli` — the agent's CLI installed and logged in ([Claude Code](https://code.claude.com) and/or [Gemini CLI](https://github.com/google-gemini/gemini-cli)), covered by a consumer subscription
+
+## Installation
 
 ```bash
-# 1) Entorno virtual e instalación (con dependencias de desarrollo)
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/D4rk3r-03/devvating.git
+cd devvating
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2) Claves de API
-cp .env.example .env      # y rellena ANTHROPIC_API_KEY y GEMINI_API_KEY
-
-# 3) Tests (no requieren claves)
-pytest
-
-# 4) Prueba de vida: Claude y Gemini leen un archivo del repo vía read_file
-devvating pruebavida DISENO.md
+# If using API backends, add your keys:
+cp .env.example .env    # then fill ANTHROPIC_API_KEY / GEMINI_API_KEY
 ```
 
-Si la prueba de vida va bien, cada agente responde con un resumen del archivo
-que solo pudo obtener llamando a la herramienta `read_file` — confirmando que
-el bucle de *tool use* con ejecución local funciona en ambos proveedores.
+## Quick start
 
-## Estructura
+```bash
+# 1) Smoke test — each agent must read a repo file and summarize it:
+devvating pruebavida README.md
+
+# 2) First debate (defaults: both agents via API):
+devvating debate "Should the tool-use loop be extracted from the adapters?" \
+    --files "devvating/adapters/claude.py, devvating/adapters/gemini.py"
+
+# 3) Execute the approved synthesis on a target git repository:
+devvating ejecutar --repo /path/to/project \
+    --from-transcript transcripts/<timestamp>-<topic>.json
+```
+
+Every debate prints the synthesis (agreements / open disagreements / plan),
+a per-agent token & cost summary, and saves a full JSON transcript under
+`transcripts/`.
+
+### Debate options
+
+| Flag | Effect |
+|------|--------|
+| `--files "a.py, b.py"` | Context hint — files the agents should look at first |
+| `--rounds N` | Max rebuttal rounds (default 2; stops early on convergence) |
+| `--interactivo` | Lets you inject a note between rounds |
+| `--profundo` | Adds a role-inversion round (each agent steelmans the other) |
+| `--synthesizer claude\|gemini\|auto` | Who writes the synthesis (`auto` rotates) |
+| `--claude-backend api\|cli` | Claude via SDK (API credits) or `claude -p` (subscription) |
+| `--gemini-backend api\|cli` | Gemini via SDK or `gemini -p` (subscription) |
+
+> 💡 **Zero-marginal-cost combo**: `--claude-backend cli` (Claude Pro/Max
+> subscription) + Gemini on the API free tier runs the whole pipeline without
+> API credits.
+
+### Execution guardrails
+
+`devvating ejecutar` refuses dirty git trees, always works on a fresh
+`devvating/<slug>-<date>` branch, only allows file edits by default
+(`--allow-commands` is an explicit, loudly-warned opt-in), and leaves changes
+**staged, never committed** — the final judgment is yours.
+
+## Configuration
+
+Project defaults live in `.devvating.json` (see `.devvating.example.json`);
+CLI flags always win:
+
+```json
+{
+  "rounds": 2,
+  "deep_mode": false,
+  "auto_rotate": true,
+  "backends": { "claude": "cli", "gemini": "api" }
+}
+```
+
+Environment variables (or `.env`):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ANTHROPIC_API_KEY` | — | Claude API backend |
+| `GEMINI_API_KEY` | — | Gemini API backend |
+| `DEVVATING_CLAUDE_MODEL` | `claude-opus-4-8` | Claude model (API backend) |
+| `DEVVATING_GEMINI_MODEL` | `gemini-3.5-flash` | Gemini model (API backend) |
+| `DEVVATING_MAX_TOOL_ITERATIONS` | `8` | Tool-use loop cap per turn |
+
+## Project layout
 
 ```
 devvating/
-├── __main__.py          # CLI unificada: devvating debate|ejecutar|pruebavida
-├── config.py            # claves, modelos, límites (.env)
-├── appconfig.py         # defaults del proyecto (.devvating.json)
-├── roles.py             # prompts por rol: proponente, réplica, inversión, sintetizador
-├── orchestrator.py      # motor del debate (rondas, convergencia, intervención)
-├── debate.py            # CLI de debate (rich, transcripts, rotación)
-├── executor.py          # fase 4: backend headless + rama + diff
-├── ejecutar.py          # CLI de ejecución (aprobación del vocero)
-├── gitutil.py           # envoltura fina de git para la fase 4
-├── rotation.py          # rotación del sintetizador entre debates (D3)
-├── adapters/            # abstracción por proveedor
-│   ├── base.py          # interfaz AgentAdapter (Protocol)
-│   ├── claude.py        # SDK anthropic + bucle de tool use
-│   ├── gemini.py        # SDK google-genai + function calling
-│   └── cli.py           # D5: claude -p / gemini -p headless (suscripción)
-├── tools/
-│   ├── registry.py      # ToolSpec + niveles de permiso (READONLY/WRITE)
-│   └── readonly.py      # read_file confinado a repo_root
-└── pruebavida.py        # M0: prueba de vida
-tests/                   # suite pytest (stubs de agente + repos git reales)
+├── __main__.py          # unified CLI: devvating debate|ejecutar|pruebavida
+├── orchestrator.py      # debate engine: rounds, convergence, usage totals
+├── roles.py             # role prompts: proponent, rebuttal, inversion, synthesizer
+├── executor.py          # execution phase: headless backend + branch + diff
+├── pricing.py           # cost table (kept out of the adapters)
+├── adapters/            # one interface, four implementations
+│   ├── base.py          #   AgentAdapter protocol + TurnUsage
+│   ├── claude.py        #   Anthropic SDK + manual tool-use loop
+│   ├── gemini.py        #   google-genai SDK + function calling
+│   └── cli.py           #   headless CLIs (subscription-covered)
+└── tools/               # local read-only tool runtime, sandboxed to the repo
+tests/                   # pytest suite — no API keys required
 ```
 
-## Licencia
+## Development
+
+```bash
+pytest              # 61 tests, <3s, fully offline
+```
+
+## Credits
+
+Idea & direction: [D4rk3r-03](https://github.com/D4rk3r-03) · Engineering: Claudio
+
+```
+   /\_/\
+  ( o.o )  ✳
+   > ^ <
+```
+
+## License
 
 [MIT](./LICENSE)
