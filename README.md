@@ -55,7 +55,10 @@ devvating pruebavida README.md
 devvating debate "Should the tool-use loop be extracted from the adapters?" \
     --files "devvating/adapters/claude.py, devvating/adapters/gemini.py"
 
-# 3) Execute the approved synthesis on a target git repository:
+# 3) Turn any debate into a shareable, self-contained HTML report:
+devvating reporte transcripts/<timestamp>-<topic>.json
+
+# 4) Execute the approved synthesis on a target git repository:
 devvating ejecutar --repo /path/to/project \
     --from-transcript transcripts/<timestamp>-<topic>.json
 ```

@@ -16,6 +16,7 @@ _USAGE = (
     "Subcomandos:\n"
     "  debate      Corre un debate multi-agente sobre un tema.\n"
     "  ejecutar    Aplica un plan aprobado en una rama.\n"
+    "  reporte     Genera un reporte HTML desde un transcript.\n"
     "  pruebavida  Prueba de vida de los adaptadores.\n\n"
     "Ejemplo: devvating debate \"¿Refactor X o Y?\" --files a.py,b.py\n"
 )
@@ -37,6 +38,10 @@ def main(argv: list[str] | None = None) -> int:
         from . import ejecutar
 
         return ejecutar.main(rest)
+    if cmd == "reporte":
+        from . import reporte
+
+        return reporte.main(rest)
     if cmd == "pruebavida":
         from . import pruebavida
 

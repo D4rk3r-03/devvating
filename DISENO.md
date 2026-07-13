@@ -377,6 +377,27 @@ Invariantes del camino CLI:
   heredadas — si el CLI las ve, les da precedencia sobre el login de
   suscripción y factura contra la clave (trampa verificada en real).
 
+### D6 — Rumbo de la interfaz: incremental, streaming diferido (2026-07-13)
+
+Decidido tras un debate profundo de la propia herramienta sobre su interfaz
+(transcript `20260713-135839-*`) y el arbitraje del vocero:
+
+- **M6a (implementado)**: heartbeat en la CLI (spinner con agente, etapa y
+  cronómetro sobre los eventos `*_inicio/*_fin` existentes; solo el callback
+  de `debate.py`) + comando `devvating reporte <transcript.json>` → HTML
+  estático autocontenido (`reporte.py`; puro renderizado, no toca el motor).
+- **TUI (Textual): descartada** — exigiría reescritura async
+  (`on_intervention` es input bloqueante) y el motivo del aplazamiento de M4
+  sigue vigente.
+- **Streaming: DIFERIDO hasta la sala web (M7)** — decisión del vocero sobre
+  las 3 opciones que dejó la ronda de inversión. Motivos: el orquestador
+  necesita réplicas completas (el streaming es cosmético aquí), la marca
+  `[CONVERGENCia]` se vería cruda en un flujo parcial, y el salto a
+  `Popen + stream-json` se amortiza mejor cuando exista la web.
+- **M7 (condicionado a demanda real tras M6a)**: sala de debate web local
+  (FastAPI + websockets) que reutiliza el renderizador de turnos del reporte
+  como view y el flujo de `on_event` como fuente de los websockets.
+
 ## 12. Preguntas abiertas (para decidir antes de M0)
 
 Ninguna bloqueante. Las decisiones D1–D4 dejan M0 listo para empezar.

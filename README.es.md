@@ -55,7 +55,10 @@ devvating pruebavida README.md
 devvating debate "¿Conviene extraer el bucle de tool use de los adaptadores?" \
     --files "devvating/adapters/claude.py, devvating/adapters/gemini.py"
 
-# 3) Ejecutar la síntesis aprobada sobre un repositorio git objetivo:
+# 3) Convertir cualquier debate en un reporte HTML autocontenido:
+devvating reporte transcripts/<fecha>-<tema>.json
+
+# 4) Ejecutar la síntesis aprobada sobre un repositorio git objetivo:
 devvating ejecutar --repo /ruta/al/proyecto \
     --from-transcript transcripts/<fecha>-<tema>.json
 ```

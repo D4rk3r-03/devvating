@@ -21,6 +21,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from . import rotation
 from .adapters.base import AgentAdapter
@@ -111,17 +112,43 @@ def main(argv: list[str] | None = None) -> int:
     claude = make_agent("claude", claude_backend, cfg, repo)
     gemini = make_agent("gemini", gemini_backend, cfg, repo)
 
+    # Heartbeat (M6a): spinner con agente, etapa y cronómetro durante cada
+    # turno, usando los pares *_inicio/*_fin que el orquestador ya emite.
+    latido: dict = {"activo": None}
+
+    def _detener_latido() -> None:
+        if latido["activo"] is not None:
+            latido["activo"].stop()
+            latido["activo"] = None
+
+    def _iniciar_latido(agente: str, fase: str) -> None:
+        _detener_latido()
+        color = _COLORS.get(agente, "white")
+        prog = Progress(
+            SpinnerColumn(),
+            TextColumn(f"[{color}]{agente}[/{color}] · {fase}…"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        )
+        prog.start()
+        prog.add_task("", total=None)
+        latido["activo"] = prog
+
     def on_event(evento: str, agente: str, texto: str | None) -> None:
         if evento == "ronda":
+            _detener_latido()
             console.rule(f"[bold]{agente}")
             return
         if evento == "convergencia":
+            _detener_latido()
             console.print(f"[bold green]✓ Convergencia en {agente}[/bold green]")
             return
         color = _COLORS.get(agente, "white")
         if evento.endswith("_inicio"):
-            console.print(f"[dim]· {agente} → {evento.removesuffix('_inicio')}…[/dim]")
+            _iniciar_latido(agente, evento.removesuffix("_inicio"))
         elif evento.endswith("_fin") and texto is not None:
+            _detener_latido()
             fase = evento.removesuffix("_fin")
             console.print(
                 Panel(Markdown(texto), title=f"[{color}]{agente} — {fase}[/{color}]",
@@ -148,13 +175,16 @@ def main(argv: list[str] | None = None) -> int:
         f"backends: claude={claude_backend}, gemini={gemini_backend}[/dim]\n"
     )
 
-    session = orch.run(
-        topic,
-        max_rounds=rounds,
-        synthesizer_index=synth_index,
-        deep_mode=deep,
-        on_intervention=on_intervention,
-    )
+    try:
+        session = orch.run(
+            topic,
+            max_rounds=rounds,
+            synthesizer_index=synth_index,
+            deep_mode=deep,
+            on_intervention=on_intervention,
+        )
+    finally:
+        _detener_latido()
 
     # Avanzar la rotación solo si se usó y el debate terminó.
     if auto_rotate:
@@ -178,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
 
     path = _save_transcript(session, repo)
     console.print(f"\n[dim]Transcript guardado en {path}[/dim]")
+    console.print(f"[dim]Reporte navegable: devvating reporte {path}[/dim]")
     console.print("\n[bold]Vocero:[/bold] revisa la síntesis y decide el camino a seguir.")
     return 0
 
