@@ -406,4 +406,12 @@ Detalles menores a afinar durante la implementación:
   `TurnUsage` en `adapters/base.py` + accessor `last_usage` por adaptador
   (sin cambiar la firma de `converse`), el orquestador copia a `Turn.usage`
   y totaliza en `DebateSession`, tabla de precios fuera de los adaptadores.
+- **Resiliencia ante errores transitorios del proveedor** (descubierto
+  2026-07-13 en el primer uso real sobre otro proyecto): un 503 "high
+  demand" de Gemini en UN turno aborta el debate entero y pierde los turnos
+  ya completados (y ya cobrados). Plan candidato: reintento con backoff por
+  turno en el orquestador (2-3 intentos ante 429/5xx), y opcionalmente
+  persistir el estado parcial del debate para reanudar. El retry del SDK de
+  Gemini (tenacity) existe pero se agota; el del orquestador daría una
+  segunda capa con espera más larga.
 - TUI gráfica (Textual) — diferida de M4.
