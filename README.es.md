@@ -61,6 +61,11 @@ devvating reporte transcripts/<fecha>-<tema>.json
 # 4) Ejecutar la síntesis aprobada sobre un repositorio git objetivo:
 devvating ejecutar --repo /ruta/al/proyecto \
     --from-transcript transcripts/<fecha>-<tema>.json
+
+# 5) O todo desde el navegador — la sala de debate, en vivo:
+pip install -e ".[hub]"
+cd devvating-ui && npm install && npm run build && cd ..
+devvating hub          # → http://127.0.0.1:8777
 ```
 
 Cada debate imprime la síntesis (acuerdos / desacuerdos abiertos / plan), un

@@ -61,6 +61,11 @@ devvating reporte transcripts/<timestamp>-<topic>.json
 # 4) Execute the approved synthesis on a target git repository:
 devvating ejecutar --repo /path/to/project \
     --from-transcript transcripts/<timestamp>-<topic>.json
+
+# 5) Or run it all from the browser — the debate room, live:
+pip install -e ".[hub]"
+cd devvating-ui && npm install && npm run build && cd ..
+devvating hub          # → http://127.0.0.1:8777
 ```
 
 Every debate prints the synthesis (agreements / open disagreements / plan),

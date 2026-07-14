@@ -394,9 +394,16 @@ Decidido tras un debate profundo de la propia herramienta sobre su interfaz
   necesita réplicas completas (el streaming es cosmético aquí), la marca
   `[CONVERGENCia]` se vería cruda en un flujo parcial, y el salto a
   `Popen + stream-json` se amortiza mejor cuando exista la web.
-- **M7 (condicionado a demanda real tras M6a)**: sala de debate web local
-  (FastAPI + websockets) que reutiliza el renderizador de turnos del reporte
-  como view y el flujo de `on_event` como fuente de los websockets.
+- **M7 — Devvating Hub (v1 implementado 2026-07-14)**: el vocero activó el
+  gate de demanda y la sala web existe — `devvating hub` (FastAPI +
+  websocket en `hub.py`; extra `[hub]`) + front React/Vite en
+  `devvating-ui/` (npm run build → dist servido por el propio hub). Cumple
+  D6: el motor sigue ciego a la UI (`_debate_worker` es otro consumidor de
+  `on_event`), los debates pasados se ven con `reporte.render_html`
+  reutilizado tal cual, y la persistencia es la misma `_save_transcript` de
+  la CLI. V1: un debate a la vez, sin intervención del vocero entre rondas
+  (para eso, la CLI `--interactivo`); el front es autocontenido (sin fuentes
+  ni CDNs externos).
 
 ### D7 — Banco de agentes plugable (2026-07-13)
 
