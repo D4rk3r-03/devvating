@@ -119,6 +119,7 @@ Environment variables (or `.env`):
 | `DEVVATING_CLAUDE_MODEL` | `claude-opus-4-8` | Claude model (API backend) |
 | `DEVVATING_GEMINI_MODEL` | `gemini-3.5-flash` | Gemini model (API backend) |
 | `DEVVATING_MAX_TOOL_ITERATIONS` | `8` | Tool-use loop cap per turn |
+| `DEVVATING_EXEC_MODEL` | `sonnet` | Model for the execution agent (phase 4) — reasoning-heavy models stay on debate duty |
 
 ## Project layout
 

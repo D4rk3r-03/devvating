@@ -119,6 +119,7 @@ Variables de entorno (o `.env`):
 | `DEVVATING_CLAUDE_MODEL` | `claude-opus-4-8` | Modelo de Claude (backend api) |
 | `DEVVATING_GEMINI_MODEL` | `gemini-3.5-flash` | Modelo de Gemini (backend api) |
 | `DEVVATING_MAX_TOOL_ITERATIONS` | `8` | Tope del bucle de herramientas por turno |
+| `DEVVATING_EXEC_MODEL` | `sonnet` | Modelo del agente ejecutor (fase 4) — los modelos de razonamiento quedan para el debate |
 
 ## Estructura
 

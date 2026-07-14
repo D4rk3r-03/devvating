@@ -73,6 +73,19 @@ class TestClaudeCodeBackendArgv:
         assert "--dangerously-skip-permissions" in argv
         assert "--allowedTools" not in argv
 
+    def test_modelo_ejecutor_por_defecto_es_sonnet(self, monkeypatch):
+        # D8: razonamiento para debatir, sonnet para ejecutar.
+        monkeypatch.delenv("DEVVATING_EXEC_MODEL", raising=False)
+        argv = ClaudeCodeBackend().build_argv("plan", allow_commands=False)
+        i = argv.index("--model")
+        assert argv[i + 1] == "sonnet"
+
+    def test_modelo_ejecutor_configurable(self, monkeypatch):
+        monkeypatch.setenv("DEVVATING_EXEC_MODEL", "claude-sonnet-4-5")
+        assert ClaudeCodeBackend().model == "claude-sonnet-4-5"
+        # El argumento explícito gana sobre el entorno.
+        assert ClaudeCodeBackend(model="opus").model == "opus"
+
     def test_no_hereda_la_clave_api_al_subprocess(self, tmp_path, monkeypatch):
         # Mismo fix D5 que en los adaptadores CLI: el ejecutor debe correr
         # `claude -p` con el login de suscripción, no con la clave heredada.

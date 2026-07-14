@@ -54,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan-file", help="Archivo de texto/markdown con el plan.")
     parser.add_argument("--branch", help="Nombre de la rama a crear.")
     parser.add_argument(
+        "--model", default=None,
+        help="Modelo del agente ejecutor (default: sonnet o DEVVATING_EXEC_MODEL; "
+             "D8: los modelos de razonamiento se reservan para el debate).",
+    )
+    parser.add_argument(
         "--allow-commands",
         action="store_true",
         help="Permite ejecutar comandos (Bash). Salta permisos — PELIGROSO.",
@@ -70,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     console.rule("[bold]DEVVATING · Ejecución (M3)")
+    console.print(f"[dim]modelo ejecutor: {backend.model}[/dim]")
     console.print(Panel(Markdown(plan.text), title="[green]Plan a ejecutar", border_style="green"))
 
     # Fase 3 — arbitraje del vocero.
@@ -87,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             console.print("Cancelado por el vocero.")
             return 0
 
-    backend = ClaudeCodeBackend()
+    backend = ClaudeCodeBackend(model=args.model)
     executor = Executor(
         args.repo,
         backend,

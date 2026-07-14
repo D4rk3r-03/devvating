@@ -437,6 +437,18 @@ solución estructural no es coronar a un lado sino **nivelar el banco**:
   Anthropic: el CLI de Google desvía la facturación al proyecto/clave
   heredados (verificado en real: agy atado a un proyecto GCP sin billing).
 
+### D8 — Separación de modelos por fase: razonar ≠ ejecutar (2026-07-14)
+
+Decisión del vocero: los modelos de más razonamiento (Opus/Fable, Gemini
+Pro) se reservan para el DEBATE — donde el valor está en pensar — y la
+EJECUCIÓN usa un modelo ejecutor disciplinado: **Sonnet** (default
+`sonnet`, que el CLI resuelve al Sonnet vigente — 5 hoy, 4.x como
+respaldo). Razones: el plan ya llega cerrado y el prompt del ejecutor exige
+interpretación conservadora sin mejoras extra (el trabajo es de obediencia,
+no de creatividad); Sonnet es más rápido y consume mucha menos cuota de
+suscripción por ejecución. Configurable con `DEVVATING_EXEC_MODEL` o
+`devvating ejecutar --model`; el Hub hereda el mismo default.
+
 ## 12. Preguntas abiertas (para decidir antes de M0)
 
 Ninguna bloqueante. Las decisiones D1–D4 dejan M0 listo para empezar.

@@ -11,6 +11,7 @@ herramientas de entorno probadas. El ejecutor añade la envoltura de seguridad:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -63,17 +64,24 @@ class HeadlessBackend(Protocol):
 
 
 class ClaudeCodeBackend:
-    """Delega en Claude Code en modo headless (`claude -p`)."""
+    """Delega en Claude Code en modo headless (`claude -p`).
+
+    D8 — separación de modelos por fase: la ejecución usa un modelo EJECUTOR
+    (default "sonnet": el alias del CLI resuelve al Sonnet vigente — 5 hoy,
+    4.x si el plan no lo trae) y los modelos de más razonamiento quedan para
+    el debate. Configurable con DEVVATING_EXEC_MODEL o el flag --model.
+    """
 
     name = "claude-code"
 
-    def __init__(self, binary: str = "claude") -> None:
+    def __init__(self, binary: str = "claude", model: str | None = None) -> None:
         self.binary = binary
+        self.model = model or os.environ.get("DEVVATING_EXEC_MODEL", "sonnet")
 
     def build_argv(self, prompt: str, allow_commands: bool) -> list[str]:
         # Sin comandos: auto-acepta ediciones de archivo, nada de Bash -> nada que
         # confirmar en headless. Con comandos: opt-in explícito y peligroso.
-        argv = [self.binary, "-p", prompt]
+        argv = [self.binary, "-p", prompt, "--model", self.model]
         if allow_commands:
             argv += ["--dangerously-skip-permissions"]
         else:
