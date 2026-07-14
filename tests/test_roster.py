@@ -79,6 +79,18 @@ class TestNuevosAdaptadores:
         i = argv.index("--model")
         assert argv[i + 1] == "Gemini 3.1 Pro (High)"
 
+    def test_antigravity_alinea_su_print_timeout_interno(self):
+        adapter = AntigravityCliAdapter(timeout=1500)
+        argv = adapter.build_argv("S", "P")
+        i = argv.index("--print-timeout")
+        assert argv[i + 1] == "1440s"  # timeout - 60s de margen
+
+    def test_timeout_cli_sobreescribible_por_entorno(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVVATING_CLI_TIMEOUT", "99")
+        assert banco.crear("kimi", CFG, str(tmp_path)).timeout == 99
+        monkeypatch.setenv("DEVVATING_CLI_TIMEOUT", "no-numero")
+        assert banco.crear("kimi", CFG, str(tmp_path)).timeout == 600  # cae al default
+
     def test_kimi_converse_devuelve_stdout(self, fake_bin, tmp_path):
         adapter = KimiCliAdapter(binary=fake_bin("kimi", 'echo "postura de kimi"'),
                                  cwd=str(tmp_path))

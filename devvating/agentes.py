@@ -10,6 +10,8 @@ listo. El par se elige con `--agentes a,b`, con `"agentes": [...]` en
 
 from __future__ import annotations
 
+import os
+
 from .adapters.base import AgentAdapter
 from .adapters.claude import ClaudeAdapter
 from .adapters.cli import (
@@ -32,13 +34,21 @@ def _gemini_api(cfg: Config, repo: str) -> AgentAdapter:
     return GeminiAdapter(cfg.gemini_api_key, cfg.gemini_model, cfg.max_tool_iterations)
 
 
+def _timeout_cli(defecto: int) -> int:
+    """Timeout de los adaptadores CLI, sobreescribible con DEVVATING_CLI_TIMEOUT."""
+    try:
+        return int(os.environ["DEVVATING_CLI_TIMEOUT"])
+    except (KeyError, ValueError):
+        return defecto
+
+
 ROSTER = {
     "claude-api": _claude_api,
-    "claude-cli": lambda cfg, repo: ClaudeCliAdapter(cwd=repo),
+    "claude-cli": lambda cfg, repo: ClaudeCliAdapter(cwd=repo, timeout=_timeout_cli(600)),
     "gemini-api": _gemini_api,
-    "gemini-cli": lambda cfg, repo: GeminiCliAdapter(cwd=repo),
-    "antigravity": lambda cfg, repo: AntigravityCliAdapter(cwd=repo),
-    "kimi": lambda cfg, repo: KimiCliAdapter(cwd=repo),
+    "gemini-cli": lambda cfg, repo: GeminiCliAdapter(cwd=repo, timeout=_timeout_cli(600)),
+    "antigravity": lambda cfg, repo: AntigravityCliAdapter(cwd=repo, timeout=_timeout_cli(1500)),
+    "kimi": lambda cfg, repo: KimiCliAdapter(cwd=repo, timeout=_timeout_cli(600)),
 }
 
 # Alias de comodidad → nombre canónico del roster.

@@ -201,10 +201,15 @@ class AntigravityCliAdapter(PlainCliAdapter):
         self,
         binary: str = "agy",
         cwd: str = ".",
-        timeout: int = 600,
+        timeout: int = 1500,
         model: str | None = None,
     ) -> None:
-        extra = ["--model", model] if model else []
+        # Los modelos Pro en tareas ancladas a código real pueden tardar >10
+        # min por turno (verificado en real). El --print-timeout interno de
+        # agy (default 5m) debe acompañar al timeout del subprocess.
+        extra = ["--print-timeout", f"{max(60, timeout - 60)}s"]
+        if model:
+            extra += ["--model", model]
         super().__init__("antigravity", binary, cwd, timeout, extra)
 
 
