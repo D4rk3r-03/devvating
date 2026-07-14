@@ -20,7 +20,9 @@ class StubAdapter:
     Registra cada llamada (system, prompt) para poder afirmar sobre el flujo
     (p. ej. que en la apertura a ciegas nadie ve la postura del otro).
     `usages` (opcional) fabrica un TurnUsage sintético por turno, en orden,
-    para probar el contador de tokens (§13) sin claves API.
+    para probar el contador de tokens (§13) sin claves API. Si una respuesta
+    programada es una Exception, se LANZA en ese turno — para probar la
+    resiliencia (reintentos, aborto, volcado parcial) sin red.
     """
 
     def __init__(
@@ -40,7 +42,10 @@ class StubAdapter:
         self.last_usage = self._usages.pop(0) if self._usages else None
         if not self._respuestas:
             return f"[{self.name}: sin respuestas programadas]"
-        return self._respuestas.pop(0)
+        respuesta = self._respuestas.pop(0)
+        if isinstance(respuesta, Exception):
+            raise respuesta
+        return respuesta
 
 
 @pytest.fixture

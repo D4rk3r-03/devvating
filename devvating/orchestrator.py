@@ -16,13 +16,33 @@ Todo en SOLO LECTURA: los agentes solo disponen de read_file.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
 from . import roles
-from .adapters.base import AgentAdapter, TurnUsage
+from .adapters.base import (
+    AgentAdapter,
+    AgentError,
+    SessionLimitError,
+    TransientProviderError,
+    TurnUsage,
+)
 from .tools.readonly import make_read_file
 from .tools.registry import ToolRegistry
+
+# Esperas del backoff por turno (plan de resiliencia; constantes fijas por
+# decisión del vocero — configurables el día que duela, no antes).
+ESPERAS_REINTENTO: tuple[int, ...] = (5, 15, 45)
+
+
+class DebateAbortedError(RuntimeError):
+    """El debate no pudo continuar; lleva la sesión parcial para no perderla."""
+
+    def __init__(self, session: "DebateSession", causa: AgentError) -> None:
+        super().__init__(str(causa))
+        self.session = session
+        self.causa = causa
 
 _VERDICT_RE = re.compile(r"\[\s*CONVERGENCIA\s*:\s*(S[IÍ]|NO)\s*\]", re.IGNORECASE)
 
@@ -81,10 +101,38 @@ class Orchestrator:
         agent_b: AgentAdapter,
         repo_root: str = ".",
         on_event: EventCb | None = None,
+        retry_waits: tuple[int, ...] = ESPERAS_REINTENTO,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.agents = [agent_a, agent_b]
         self.repo_root = repo_root
         self._on_event = on_event or (lambda *_: None)
+        self._retry_waits = retry_waits
+        self._sleep = sleep
+
+    def _converse_con_reintento(
+        self, agent: AgentAdapter, system: str, prompt: str, registry: ToolRegistry
+    ) -> str:
+        """Envuelve converse con la política por clase de fallo (plan resiliencia).
+
+        Transitorios (503/429 momentáneo): backoff según `retry_waits`.
+        Límite de sesión y fallos sin clasificar: no se reintentan — el
+        llamador (run) convierte en DebateAbortedError con la sesión parcial.
+        """
+        ultimo: TransientProviderError | None = None
+        for espera in (*self._retry_waits, None):
+            try:
+                return agent.converse(system, prompt, registry)
+            except TransientProviderError as exc:
+                ultimo = exc
+                if espera is None:
+                    break
+                self._on_event(
+                    "reintento", agent.name,
+                    f"fallo transitorio del proveedor; reintentando en {espera}s",
+                )
+                self._sleep(espera)
+        raise ultimo  # agotados los reintentos
 
     def _registry(self) -> ToolRegistry:
         # Solo lectura durante el debate (nadie puede escribir ni ejecutar).
@@ -106,13 +154,35 @@ class Orchestrator:
     ) -> DebateSession:
         session = DebateSession(topic=topic, deep_mode=deep_mode)
         registry = self._registry()
+        try:
+            return self._correr(
+                session, topic, registry, max_rounds, synthesizer_index,
+                deep_mode, on_intervention,
+            )
+        except AgentError as exc:
+            # Fallo irrecuperable: totalizar lo pagado y entregar la sesión
+            # parcial — los turnos completados nunca se pierden (plan §13).
+            session.usage_totals = self._totalizar(session)
+            raise DebateAbortedError(session, exc) from exc
 
+    def _correr(
+        self,
+        session: DebateSession,
+        topic: DebateTopic,
+        registry: ToolRegistry,
+        max_rounds: int,
+        synthesizer_index: int,
+        deep_mode: bool,
+        on_intervention: InterventionCb | None,
+    ) -> DebateSession:
         # --- Apertura a ciegas (ronda 0) ------------------------------------
         self._on_event("ronda", "apertura a ciegas", None)
         positions: dict[str, str] = {}
         for agent in self.agents:
             self._on_event("propuesta_inicio", agent.name, None)
-            text = agent.converse(roles.PROPONENTE, roles.prompt_propuesta(topic), registry)
+            text = self._converse_con_reintento(
+                agent, roles.PROPONENTE, roles.prompt_propuesta(topic), registry
+            )
             positions[agent.name] = text
             session.turns.append(
                 Turn(0, "propuesta", agent.name, text, usage=self._usage_de(agent))
@@ -132,7 +202,8 @@ class Orchestrator:
             for agent in self.agents:
                 other = self._other(agent)
                 self._on_event("replica_inicio", agent.name, None)
-                raw = agent.converse(
+                raw = self._converse_con_reintento(
+                    agent,
                     roles.REPLICA,
                     roles.prompt_replica(
                         topic, positions[agent.name], positions[other.name], other.name, nota
@@ -160,7 +231,8 @@ class Orchestrator:
             for agent in self.agents:
                 other = self._other(agent)
                 self._on_event("inversion_inicio", agent.name, None)
-                text = agent.converse(
+                text = self._converse_con_reintento(
+                    agent,
                     roles.INVERSION,
                     roles.prompt_inversion(
                         topic, positions[agent.name], positions[other.name], other.name
@@ -183,7 +255,8 @@ class Orchestrator:
             else f"NO hubo convergencia tras {session.rounds_run} ronda(s); "
             "reporta explícitamente los desacuerdos abiertos."
         )
-        text = synth.converse(
+        text = self._converse_con_reintento(
+            synth,
             roles.SINTETIZADOR,
             roles.prompt_sintesis(topic, self._transcript_text(session), nota_conv),
             registry,

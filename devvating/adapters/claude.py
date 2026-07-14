@@ -11,7 +11,7 @@ from dataclasses import replace
 import anthropic
 
 from ..tools.registry import ToolRegistry
-from .base import TurnUsage
+from .base import TransientProviderError, TurnUsage
 
 
 def _usage_de_respuesta(u) -> TurnUsage:
@@ -54,14 +54,22 @@ class ClaudeAdapter:
         total = TurnUsage()
 
         for _ in range(self._max_iterations):
-            response = self._client.messages.create(
-                model=self._model,
-                max_tokens=8000,
-                thinking={"type": "adaptive"},
-                system=system,
-                tools=tools,
-                messages=messages,
-            )
+            try:
+                response = self._client.messages.create(
+                    model=self._model,
+                    max_tokens=8000,
+                    thinking={"type": "adaptive"},
+                    system=system,
+                    tools=tools,
+                    messages=messages,
+                )
+            except (
+                anthropic.RateLimitError,
+                anthropic.InternalServerError,
+                anthropic.APIConnectionError,
+            ) as exc:
+                # 429/5xx/red: transitorio — el orquestador decide reintentar.
+                raise TransientProviderError(f"API de Claude: {exc}") from exc
             total = total + _usage_de_respuesta(response.usage)
 
             # Ejecutar cualquier herramienta que Claude haya pedido.

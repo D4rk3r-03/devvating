@@ -17,14 +17,38 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 
 from ..tools.registry import ToolRegistry
-from .base import TurnUsage
+from .base import AgentError, SessionLimitError, TransientProviderError, TurnUsage
 
 
-class CliAdapterError(RuntimeError):
-    pass
+class CliAdapterError(AgentError):
+    """Fallo de CLI sin clasificación conocida (no reintentable)."""
+
+
+_TRANSITORIO_RE = re.compile(
+    r"(?i)\b(503|429|529|resource_exhausted|unavailable|overloaded|high demand|rate limit)\b"
+)
+_LIMITE_SESION_RE = re.compile(r"(?i)session limit")
+_RESETS_RE = re.compile(r"(?i)resets\s+([^\n·]+)")
+
+
+def clasificar_fallo(detalle: str, prefijo: str) -> AgentError:
+    """Mapea el texto de error de un CLI a la taxonomía (plan de resiliencia).
+
+    Heurística textual: es el único dato disponible en los CLIs de texto
+    plano. Sin match → CliAdapterError genérico, que el orquestador NO
+    reintenta (mejor abortar informando que reintentar a ciegas).
+    """
+    if _LIMITE_SESION_RE.search(detalle):
+        m = _RESETS_RE.search(detalle)
+        resets = m.group(1).strip() if m else None
+        return SessionLimitError(f"{prefijo}: {detalle}", resets_at=resets)
+    if _TRANSITORIO_RE.search(detalle):
+        return TransientProviderError(f"{prefijo}: {detalle}")
+    return CliAdapterError(f"{prefijo}: {detalle}")
 
 
 def env_suscripcion() -> dict[str, str]:
@@ -93,7 +117,7 @@ class ClaudeCliAdapter:
         proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout, "Claude Code")
         if proc.returncode != 0:
             detalle = (proc.stderr or proc.stdout).strip()[:500]
-            raise CliAdapterError(f"claude -p salió con código {proc.returncode}: {detalle}")
+            raise clasificar_fallo(detalle, f"claude -p salió con código {proc.returncode}")
         try:
             data = json.loads(proc.stdout)
         except ValueError as exc:
@@ -101,7 +125,12 @@ class ClaudeCliAdapter:
                 f"Salida no-JSON de claude -p: {proc.stdout.strip()[:200]}"
             ) from exc
         if data.get("is_error"):
-            raise CliAdapterError(f"claude -p reportó error: {data.get('result', '')}")
+            # El JSON trae la clasificación fina: texto del error + status API.
+            detalle = str(data.get("result", ""))
+            status = data.get("api_error_status")
+            if isinstance(status, int) and (status == 429 or status >= 500):
+                detalle = f"{detalle} [{status}]"
+            raise clasificar_fallo(detalle, "claude -p reportó error")
 
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         cost = data.get("total_cost_usd")
@@ -148,8 +177,8 @@ class PlainCliAdapter:
         proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout, self.name)
         if proc.returncode != 0:
             detalle = (proc.stderr or proc.stdout).strip()[:500]
-            raise CliAdapterError(
-                f"{self.binary} -p salió con código {proc.returncode}: {detalle}"
+            raise clasificar_fallo(
+                detalle, f"{self.binary} -p salió con código {proc.returncode}"
             )
         return proc.stdout.strip()
 

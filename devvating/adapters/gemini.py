@@ -10,10 +10,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from ..tools.registry import ToolRegistry
-from .base import TurnUsage
+from .base import TransientProviderError, TurnUsage
 
 
 def _usage_de_respuesta(response) -> TurnUsage:
@@ -66,11 +67,18 @@ class GeminiAdapter:
         total = TurnUsage()
 
         for _ in range(self._max_iterations):
-            response = self._client.models.generate_content(
-                model=self._model,
-                contents=contents,
-                config=config,
-            )
+            try:
+                response = self._client.models.generate_content(
+                    model=self._model,
+                    contents=contents,
+                    config=config,
+                )
+            except genai_errors.APIError as exc:
+                codigo = getattr(exc, "code", None)
+                if codigo == 429 or (isinstance(codigo, int) and codigo >= 500):
+                    # 429/5xx: transitorio — el orquestador decide reintentar.
+                    raise TransientProviderError(f"API de Gemini: {exc}") from exc
+                raise
             total = total + _usage_de_respuesta(response)
             candidate = response.candidates[0]
             parts = candidate.content.parts or []

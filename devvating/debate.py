@@ -26,19 +26,21 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from . import agentes as banco
 from . import rotation
 from .adapters.base import AgentAdapter
+from .adapters.base import SessionLimitError
 from .appconfig import ProjectConfig
 from .config import Config
-from .orchestrator import DebateSession, DebateTopic, Orchestrator
+from .orchestrator import DebateAbortedError, DebateSession, DebateTopic, Orchestrator
 
 _COLORS = {"claude": "cyan", "gemini": "magenta", "antigravity": "blue", "kimi": "green"}
 
 
-def _save_transcript(session: DebateSession, repo_root: str) -> Path:
+def _save_transcript(session: DebateSession, repo_root: str, parcial: bool = False) -> Path:
     out_dir = Path(repo_root) / "transcripts"
     out_dir.mkdir(exist_ok=True)
     slug = "-".join(session.topic.prompt.lower().split()[:6]) or "debate"
     slug = "".join(c for c in slug if c.isalnum() or c == "-")[:60]
-    path = out_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}.json"
+    sufijo = ".partial.json" if parcial else ".json"
+    path = out_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}{sufijo}"
     path.write_text(
         json.dumps(asdict(session), ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -154,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
             _detener_latido()
             console.print(f"[bold green]✓ Convergencia en {agente}[/bold green]")
             return
+        if evento == "reintento":
+            console.print(f"[yellow]⟳ {agente}: {texto}[/yellow]")
+            return
         color = _COLORS.get(agente, "white")
         if evento.endswith("_inicio"):
             _iniciar_latido(agente, evento.removesuffix("_inicio"))
@@ -193,6 +198,22 @@ def main(argv: list[str] | None = None) -> int:
             deep_mode=deep,
             on_intervention=on_intervention,
         )
+    except DebateAbortedError as exc:
+        # Amabilidad (plan de resiliencia): nada de traceback — mensaje humano
+        # y los turnos ya pagados a salvo en un transcript parcial.
+        console.print(f"\n[bold red]Debate interrumpido:[/bold red] {exc.causa}")
+        if isinstance(exc.causa, SessionLimitError) and exc.causa.resets_at:
+            console.print(
+                f"[yellow]La cuota de suscripción se reinicia a las "
+                f"{exc.causa.resets_at} — relanza el debate entonces.[/yellow]"
+            )
+        if exc.session.turns:
+            parcial = _save_transcript(exc.session, repo, parcial=True)
+            console.print(
+                f"[dim]{len(exc.session.turns)} turno(s) completados guardados en "
+                f"{parcial} (nada se perdió).[/dim]"
+            )
+        return 1
     finally:
         _detener_latido()
 

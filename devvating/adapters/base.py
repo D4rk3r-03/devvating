@@ -17,6 +17,31 @@ from typing import Protocol, runtime_checkable
 from ..tools.registry import ToolRegistry
 
 
+# --- Taxonomía de fallos (plan del debate de resiliencia, 2026-07-13) --------
+# Los adaptadores CLASIFICAN lanzando estos tipos; el REINTENTO vive en el
+# orquestador. Todo lo que no se pueda clasificar queda como AgentError plano
+# (no reintentable por defecto).
+
+
+class AgentError(RuntimeError):
+    """Fallo de un agente. Base de la taxonomía; no reintentable por defecto."""
+
+
+class TransientProviderError(AgentError):
+    """Fallo transitorio del proveedor (503/429 momentáneo): vale reintentar."""
+
+
+class SessionLimitError(AgentError):
+    """Cuota por ventana de tiempo agotada: no se cura con backoff corto.
+
+    `resets_at` lleva la hora de reinicio si el proveedor la reportó.
+    """
+
+    def __init__(self, mensaje: str, resets_at: str | None = None) -> None:
+        super().__init__(mensaje)
+        self.resets_at = resets_at
+
+
 @dataclass
 class TurnUsage:
     """Tokens y costo de un turno. `cost_usd` es None si no hay tarifa conocida."""
