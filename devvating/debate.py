@@ -2,8 +2,10 @@
 
 Uso:
     devvating debate "tu tema"  [--files "a.py, b.py"] [--repo .]
-        [--rounds N] [--synthesizer claude|gemini|auto]
+        [--rounds N] [--synthesizer <agente>|auto] [--agentes a,b]
         [--profundo] [--interactivo]
+    devvating debate --resume transcripts/<x>.partial.json  [--agentes a,b]
+        (reanuda un debate interrumpido sin repetir los turnos ya pagados)
 
 Los defaults (rondas, modo profundo, repo, files, rotación) se toman de
 `.devvating.json` si existe; los flags CLI tienen prioridad. Con
@@ -25,11 +27,10 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from . import agentes as banco
 from . import rotation
-from .adapters.base import AgentAdapter
-from .adapters.base import SessionLimitError
+from .adapters.base import AgentAdapter, SessionLimitError, TurnUsage
 from .appconfig import ProjectConfig
 from .config import Config
-from .orchestrator import DebateAbortedError, DebateSession, DebateTopic, Orchestrator
+from .orchestrator import DebateAbortedError, DebateSession, DebateTopic, Orchestrator, Turn
 
 _COLORS = {"claude": "cyan", "gemini": "magenta", "antigravity": "blue", "kimi": "green"}
 
@@ -52,9 +53,45 @@ def make_agent(provider: str, backend: str, cfg: Config, repo: str) -> AgentAdap
     return banco.crear(f"{provider}-{backend}", cfg, repo)
 
 
+def _load_partial_session(path: str) -> DebateSession:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    
+    topic = DebateTopic(
+        prompt=data["topic"]["prompt"],
+        context_hint=data["topic"].get("context_hint", "")
+    )
+    
+    turns = []
+    for td in data.get("turns", []):
+        usage = None
+        if td.get("usage"):
+            usage = TurnUsage(**td["usage"])
+        turns.append(Turn(
+            round=td["round"],
+            phase=td["phase"],
+            agent=td["agent"],
+            text=td["text"],
+            verdict=td.get("verdict"),
+            usage=usage
+        ))
+    
+    return DebateSession(
+        topic=topic,
+        turns=turns,
+        rounds_run=data.get("rounds_run", 0),
+        converged=data.get("converged", False),
+        converged_round=data.get("converged_round"),
+        deep_mode=data.get("deep_mode", False),
+        synthesis=data.get("synthesis", ""),
+        synthesizer=data.get("synthesizer", "")
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="devvating debate", description="Debate multi-agente.")
-    parser.add_argument("tema", help="El tema a debatir (problema, mejora, decisión).")
+    parser.add_argument("tema", nargs="?", default=None, help="El tema a debatir (problema, mejora, decisión).")
+    parser.add_argument("--resume", default=None, help="Ruta a un archivo .partial.json para reanudar.")
     parser.add_argument("--files", default=None, help="Pista de archivos relevantes.")
     parser.add_argument("--repo", default=None, help="Raíz del repositorio.")
     parser.add_argument("--rounds", type=int, default=None, help="Tope de rondas de réplica.")
@@ -82,6 +119,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Backend de Gemini: api (SDK) o cli (gemini -p, suscripción).",
     )
     args = parser.parse_args(argv)
+
+    if not args.tema and not args.resume:
+        parser.error("Debes proveer un tema o usar --resume para reanudar un debate previo.")
+
+    old_session = None
+    if args.resume:
+        old_session = _load_partial_session(args.resume)
+        args.tema = old_session.topic.prompt
+        if old_session.topic.context_hint and not args.files:
+            args.files = old_session.topic.context_hint
+        args.profundo = old_session.deep_mode
 
     console = Console()
     cfg = Config.from_env()
@@ -197,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
             synthesizer_index=synth_index,
             deep_mode=deep,
             on_intervention=on_intervention,
+            old_session=old_session,
         )
     except DebateAbortedError as exc:
         # Amabilidad (plan de resiliencia): nada de traceback — mensaje humano

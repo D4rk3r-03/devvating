@@ -457,6 +457,10 @@ Detalles menores a afinar durante la implementación:
   "reintento" al vocero), límite de sesión y fallos desconocidos abortan de
   inmediato, y `DebateAbortedError` entrega la sesión parcial que `debate.py`
   vuelca a `transcripts/*.partial.json` con mensaje humano (hora de reset
-  incluida). **Diferido con debate propio**: comando `reanudar` desde el
-  transcript parcial.
+  incluida). El comando de reanudación llegó al día siguiente:
+  **`--resume <x>.partial.json` (implementado 2026-07-14, dirigido por el
+  vocero)** — carga la sesión parcial y hace fast-forward de los turnos ya
+  pagados (por ronda/fase/agente), retomando exactamente donde se cortó.
+  Estrenado en real reanudando la auditoría de FIEL-FILE tras un corte de
+  cuota, sin repetir ni un turno.
 - TUI gráfica (Textual) — diferida de M4.

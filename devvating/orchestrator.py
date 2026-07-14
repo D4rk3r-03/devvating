@@ -151,13 +151,14 @@ class Orchestrator:
         synthesizer_index: int = 0,
         deep_mode: bool = False,
         on_intervention: InterventionCb | None = None,
+        old_session: DebateSession | None = None,
     ) -> DebateSession:
         session = DebateSession(topic=topic, deep_mode=deep_mode)
         registry = self._registry()
         try:
             return self._correr(
                 session, topic, registry, max_rounds, synthesizer_index,
-                deep_mode, on_intervention,
+                deep_mode, on_intervention, old_session
             )
         except AgentError as exc:
             # Fallo irrecuperable: totalizar lo pagado y entregar la sesión
@@ -174,19 +175,34 @@ class Orchestrator:
         synthesizer_index: int,
         deep_mode: bool,
         on_intervention: InterventionCb | None,
+        old_session: DebateSession | None = None,
     ) -> DebateSession:
+        
+        def _get_turn(round_idx: int, phase: str, agent_name: str) -> Turn | None:
+            if not old_session:
+                return None
+            for t in old_session.turns:
+                if t.round == round_idx and t.phase == phase and t.agent == agent_name:
+                    return t
+            return None
+
         # --- Apertura a ciegas (ronda 0) ------------------------------------
         self._on_event("ronda", "apertura a ciegas", None)
         positions: dict[str, str] = {}
         for agent in self.agents:
             self._on_event("propuesta_inicio", agent.name, None)
-            text = self._converse_con_reintento(
-                agent, roles.PROPONENTE, roles.prompt_propuesta(topic), registry
-            )
+            existente = _get_turn(0, "propuesta", agent.name)
+            if existente:
+                text = existente.text
+                session.turns.append(existente)
+            else:
+                text = self._converse_con_reintento(
+                    agent, roles.PROPONENTE, roles.prompt_propuesta(topic), registry
+                )
+                session.turns.append(
+                    Turn(0, "propuesta", agent.name, text, usage=self._usage_de(agent))
+                )
             positions[agent.name] = text
-            session.turns.append(
-                Turn(0, "propuesta", agent.name, text, usage=self._usage_de(agent))
-            )
             self._on_event("propuesta_fin", agent.name, text)
 
         # --- Rondas de réplica con reglas de convergencia -------------------
@@ -202,20 +218,25 @@ class Orchestrator:
             for agent in self.agents:
                 other = self._other(agent)
                 self._on_event("replica_inicio", agent.name, None)
-                raw = self._converse_con_reintento(
-                    agent,
-                    roles.REPLICA,
-                    roles.prompt_replica(
-                        topic, positions[agent.name], positions[other.name], other.name, nota
-                    ),
-                    registry,
-                )
-                clean, verdict = _parse_verdict(raw)
+                existente = _get_turn(r, "replica", agent.name)
+                if existente:
+                    clean, verdict = existente.text, existente.verdict
+                    session.turns.append(existente)
+                else:
+                    raw = self._converse_con_reintento(
+                        agent,
+                        roles.REPLICA,
+                        roles.prompt_replica(
+                            topic, positions[agent.name], positions[other.name], other.name, nota
+                        ),
+                        registry,
+                    )
+                    clean, verdict = _parse_verdict(raw)
+                    session.turns.append(
+                        Turn(r, "replica", agent.name, clean, verdict, usage=self._usage_de(agent))
+                    )
                 new_positions[agent.name] = clean
                 verdicts[agent.name] = verdict
-                session.turns.append(
-                    Turn(r, "replica", agent.name, clean, verdict, usage=self._usage_de(agent))
-                )
                 self._on_event("replica_fin", agent.name, clean)
 
             positions = new_positions
@@ -231,41 +252,51 @@ class Orchestrator:
             for agent in self.agents:
                 other = self._other(agent)
                 self._on_event("inversion_inicio", agent.name, None)
-                text = self._converse_con_reintento(
-                    agent,
-                    roles.INVERSION,
-                    roles.prompt_inversion(
-                        topic, positions[agent.name], positions[other.name], other.name
-                    ),
-                    registry,
-                )
-                session.turns.append(
-                    Turn(session.rounds_run, "inversion", agent.name, text,
-                         usage=self._usage_de(agent))
-                )
+                existente = _get_turn(session.rounds_run, "inversion", agent.name)
+                if existente:
+                    text = existente.text
+                    session.turns.append(existente)
+                else:
+                    text = self._converse_con_reintento(
+                        agent,
+                        roles.INVERSION,
+                        roles.prompt_inversion(
+                            topic, positions[agent.name], positions[other.name], other.name
+                        ),
+                        registry,
+                    )
+                    session.turns.append(
+                        Turn(session.rounds_run, "inversion", agent.name, text,
+                             usage=self._usage_de(agent))
+                    )
                 self._on_event("inversion_fin", agent.name, text)
 
         # --- Síntesis (agente rotativo) -------------------------------------
         synth = self.agents[synthesizer_index % len(self.agents)]
         self._on_event("ronda", "síntesis", None)
         self._on_event("sintesis_inicio", synth.name, None)
-        nota_conv = (
-            f"Los agentes CONVERGIERON en la ronda {session.converged_round}."
-            if session.converged
-            else f"NO hubo convergencia tras {session.rounds_run} ronda(s); "
-            "reporta explícitamente los desacuerdos abiertos."
-        )
-        text = self._converse_con_reintento(
-            synth,
-            roles.SINTETIZADOR,
-            roles.prompt_sintesis(topic, self._transcript_text(session), nota_conv),
-            registry,
-        )
+        existente = _get_turn(session.rounds_run, "sintesis", synth.name)
+        if existente:
+            text = existente.text
+            session.turns.append(existente)
+        else:
+            nota_conv = (
+                f"Los agentes CONVERGIERON en la ronda {session.converged_round}."
+                if session.converged
+                else f"NO hubo convergencia tras {session.rounds_run} ronda(s); "
+                "reporta explícitamente los desacuerdos abiertos."
+            )
+            text = self._converse_con_reintento(
+                synth,
+                roles.SINTETIZADOR,
+                roles.prompt_sintesis(topic, self._transcript_text(session), nota_conv),
+                registry,
+            )
+            session.turns.append(
+                Turn(session.rounds_run, "sintesis", synth.name, text, usage=self._usage_de(synth))
+            )
         session.synthesis = text
         session.synthesizer = synth.name
-        session.turns.append(
-            Turn(session.rounds_run, "sintesis", synth.name, text, usage=self._usage_de(synth))
-        )
         self._on_event("sintesis_fin", synth.name, text)
 
         session.usage_totals = self._totalizar(session)
