@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import queue
 import re
 import threading
 from dataclasses import asdict
@@ -38,7 +39,12 @@ from . import agentes as banco
 from . import reporte, rotation
 from .config import Config
 from .debate import _save_transcript
+from .executor import ClaudeCodeBackend, ExecutionPlan, Executor, ExecutorError
 from .orchestrator import DebateAbortedError, DebateTopic, Orchestrator
+
+# La intervención del vocero espera hasta este tope y luego continúa sin nota
+# (el debate no debe quedar rehén de una pestaña cerrada).
+TIMEOUT_INTERVENCION = 300
 
 _DIST = Path(__file__).resolve().parent.parent / "devvating-ui" / "dist"
 _NOMBRE_TRANSCRIPT_RE = re.compile(r"^[\w\-. áéíóúñÁÉÍÓÚÑ¿?]+\.json$")
@@ -58,9 +64,17 @@ npm run build</pre>
 
 
 def _debate_worker(
-    config: dict, emitir: Callable[[dict], None], fabrica_par: Callable
+    config: dict,
+    emitir: Callable[[dict], None],
+    fabrica_par: Callable,
+    esperar_nota: Callable[[int], str | None] | None = None,
 ) -> None:
-    """Corre un debate completo en un hilo, emitiendo eventos JSON-planos."""
+    """Corre un debate completo en un hilo, emitiendo eventos JSON-planos.
+
+    `esperar_nota(ronda)` es el puente de la intervención del vocero (D4,
+    Fase 2 del plan del Hub): bloquea el hilo del debate hasta que el
+    navegador responda o venza el timeout.
+    """
     repo = config.get("repo", ".")
     cfg = Config.from_env()
     try:
@@ -73,6 +87,15 @@ def _debate_worker(
     def on_event(evento: str, agente: str, texto: str | None) -> None:
         emitir({"tipo": "evento", "evento": evento, "agente": agente, "texto": texto})
 
+    on_intervention = None
+    if config.get("interactivo") and esperar_nota is not None:
+        def on_intervention(ronda: int) -> str | None:
+            emitir({"tipo": "intervencion_pendiente", "ronda": ronda,
+                    "timeout": TIMEOUT_INTERVENCION})
+            nota = esperar_nota(ronda)
+            emitir({"tipo": "intervencion_resuelta", "ronda": ronda, "texto": nota})
+            return nota
+
     orch = Orchestrator(agente_a, agente_b, repo_root=repo, on_event=on_event)
     topic = DebateTopic(prompt=config["tema"], context_hint=config.get("files", ""))
     estado_rotacion = rotation.load(repo)
@@ -83,6 +106,7 @@ def _debate_worker(
             max_rounds=int(config.get("rounds", 2)),
             synthesizer_index=estado_rotacion.synthesizer_index(),
             deep_mode=bool(config.get("profundo", False)),
+            on_intervention=on_intervention,
         )
     except DebateAbortedError as exc:
         parcial = None
@@ -115,12 +139,62 @@ def _debate_worker(
     emitir({"tipo": "cerrado"})
 
 
-def crear_app(repo: str = ".", fabrica_par: Callable = banco.par) -> FastAPI:
+def _ejecucion_worker(
+    config: dict, emitir: Callable[[dict], None], backend=None
+) -> None:
+    """Aplica un plan en una rama (fase 4) y emite el diff resultante.
+
+    Salvaguardas del plan del Hub: SIEMPRE sin comandos (allow_commands es
+    opt-in exclusivo de la CLI), el Executor exige árbol limpio y deja los
+    cambios en staging — el Hub solo muestra; el commit es del vocero.
+    """
+    try:
+        plan = ExecutionPlan(text=config["plan"], title=config.get("titulo", "plan"))
+        ejecutor = Executor(
+            config["repo"],
+            backend or ClaudeCodeBackend(),
+            on_event=lambda ev, val: emitir(
+                {"tipo": "ejecucion_evento", "evento": ev, "valor": val}
+            ),
+        )
+        resultado = ejecutor.execute(plan, allow_commands=False)
+    except (ExecutorError, KeyError) as exc:
+        mensaje = str(exc)
+        if "sin confirmar" in mensaje:
+            # Tropiezo común al debatir y ejecutar en el mismo repo: el
+            # transcript recién guardado ensucia el árbol.
+            mensaje += (
+                " Pista: si lo único nuevo son artefactos del propio debate, "
+                "añade 'transcripts/' y '.devvating/' al .gitignore del repo."
+            )
+        emitir({"tipo": "ejecucion_error", "mensaje": mensaje})
+        emitir({"tipo": "ejecucion_cerrada"})
+        return
+    emitir({
+        "tipo": "ejecucion_fin",
+        "rama": resultado.branch,
+        "returncode": resultado.returncode,
+        "archivos": resultado.changed_files,
+        "diff": resultado.diff,
+    })
+    emitir({"tipo": "ejecucion_cerrada"})
+
+
+def crear_app(
+    repo: str = ".",
+    fabrica_par: Callable = banco.par,
+    backend_ejecucion=None,
+) -> FastAPI:
     app = FastAPI(title="Devvating Hub")
     app.state.historial = []          # eventos del debate en curso/último
     app.state.clientes = set()        # websockets conectados
     app.state.corriendo = False
+    app.state.ejecutando = False
     app.state.cola = None
+    # Puente de intervención (Fase 2): el hilo del debate espera aquí la
+    # nota del vocero que llega por POST /api/intervencion.
+    app.state.notas = queue.Queue()
+    app.state.intervencion_abierta = False
 
     @app.on_event("startup")
     async def _arrancar() -> None:
@@ -134,6 +208,9 @@ def crear_app(repo: str = ".", fabrica_par: Callable = banco.par) -> FastAPI:
             if msg.get("tipo") == "cerrado":
                 app.state.corriendo = False
                 continue
+            if msg.get("tipo") == "ejecucion_cerrada":
+                app.state.ejecutando = False
+                continue
             app.state.historial.append(msg)
             for ws in set(app.state.clientes):
                 try:
@@ -144,6 +221,23 @@ def crear_app(repo: str = ".", fabrica_par: Callable = banco.par) -> FastAPI:
     def _emitir(msg: dict) -> None:
         app.state.loop.call_soon_threadsafe(app.state.cola.put_nowait, msg)
 
+    def _esperar_nota(ronda: int) -> str | None:
+        """Bloquea el hilo del debate hasta la nota del vocero (o timeout)."""
+        # Vaciar notas viejas de una intervención anterior abandonada.
+        while not app.state.notas.empty():
+            try:
+                app.state.notas.get_nowait()
+            except queue.Empty:
+                break
+        app.state.intervencion_abierta = True
+        try:
+            nota = app.state.notas.get(timeout=TIMEOUT_INTERVENCION)
+        except queue.Empty:
+            nota = None  # el debate no queda rehén de una pestaña cerrada
+        finally:
+            app.state.intervencion_abierta = False
+        return nota or None
+
     # ------------------------------------------------------------------ API
     @app.get("/api/roster")
     def roster() -> dict:
@@ -151,7 +245,12 @@ def crear_app(repo: str = ".", fabrica_par: Callable = banco.par) -> FastAPI:
 
     @app.get("/api/estado")
     def estado() -> dict:
-        return {"corriendo": app.state.corriendo, "eventos": len(app.state.historial)}
+        return {
+            "corriendo": app.state.corriendo,
+            "ejecutando": app.state.ejecutando,
+            "intervencion_abierta": app.state.intervencion_abierta,
+            "eventos": len(app.state.historial),
+        }
 
     @app.post("/api/debates", status_code=202)
     def lanzar(config: dict) -> dict:
@@ -170,9 +269,49 @@ def crear_app(repo: str = ".", fabrica_par: Callable = banco.par) -> FastAPI:
             "tema": tema, "agentes": agentes,
             "rounds": config.get("rounds", 2),
             "profundo": bool(config.get("profundo", False)),
+            "interactivo": bool(config.get("interactivo", False)),
         }})
         threading.Thread(
-            target=_debate_worker, args=(config, _emitir, fabrica_par), daemon=True
+            target=_debate_worker,
+            args=(config, _emitir, fabrica_par, _esperar_nota),
+            daemon=True,
+        ).start()
+        return {"ok": True}
+
+    @app.post("/api/intervencion")
+    def intervenir(cuerpo: dict) -> dict:
+        """Recibe la nota del vocero (Fase 2). Nota vacía/null = continuar."""
+        if not app.state.intervencion_abierta:
+            raise HTTPException(409, "No hay ninguna intervención pendiente.")
+        app.state.notas.put(str(cuerpo.get("nota") or "").strip())
+        return {"ok": True}
+
+    @app.post("/api/ejecutar", status_code=202)
+    def ejecutar(cuerpo: dict) -> dict:
+        """Fase 3: aplica la síntesis de un transcript en una rama del repo.
+
+        Decisión del vocero pendiente en el plan → default conservador:
+        el Hub se detiene en staging + diff; commit/descartar es manual.
+        """
+        if app.state.ejecutando:
+            raise HTTPException(409, "Ya hay una ejecución en curso.")
+        nombre = str(cuerpo.get("transcript", ""))
+        data = json.loads(_ruta_transcript(nombre).read_text(encoding="utf-8"))
+        plan = str(data.get("synthesis", "")).strip()
+        if not plan:
+            raise HTTPException(422, "El transcript no contiene una síntesis.")
+        repo_objetivo = str(cuerpo.get("repo") or repo)
+        app.state.ejecutando = True
+        _emitir({"tipo": "ejecucion_inicio", "transcript": nombre, "repo": repo_objetivo})
+        threading.Thread(
+            target=_ejecucion_worker,
+            args=(
+                {"plan": plan, "repo": repo_objetivo,
+                 "titulo": data.get("topic", {}).get("prompt", "plan")},
+                _emitir,
+                backend_ejecucion,
+            ),
+            daemon=True,
         ).start()
         return {"ok": True}
 

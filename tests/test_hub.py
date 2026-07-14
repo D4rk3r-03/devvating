@@ -128,3 +128,137 @@ class TestApi:
         r = c.get("/")
         assert r.status_code == 200
         assert "npm run build" in r.text or "<div id=\"root\">" in r.text
+
+class TestIntervencion:
+    def test_flujo_completo_de_intervencion(self, tmp_path):
+        """El debate espera la nota del vocero y la inyecta en la ronda."""
+        def fabrica(nombres, cfg, repo):
+            a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
+            b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+            fabrica.a = a
+            return a, b
+
+        app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
+        with TestClient(app) as c:
+            # Sin intervención pendiente, el endpoint rechaza.
+            assert c.post("/api/intervencion", json={"nota": "x"}).status_code == 409
+            c.post("/api/debates", json={**CONFIG, "interactivo": True})
+            for _ in range(100):
+                if c.get("/api/estado").json()["intervencion_abierta"]:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("nunca se abrió la intervención")
+            assert c.post("/api/intervencion",
+                          json={"nota": "ojo con el rendimiento"}).status_code == 200
+            for _ in range(100):
+                if not c.get("/api/estado").json()["corriendo"]:
+                    break
+                time.sleep(0.05)
+        # La nota llegó al prompt de la réplica (mismo contrato que la CLI).
+        assert any("ojo con el rendimiento" in p for _, p in fabrica.a.llamadas)
+
+    def test_nota_vacia_continua_sin_nota(self, tmp_path):
+        def fabrica(nombres, cfg, repo):
+            a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
+            b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+            fabrica.a = a
+            return a, b
+
+        app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
+        with TestClient(app) as c:
+            c.post("/api/debates", json={**CONFIG, "interactivo": True})
+            for _ in range(100):
+                if c.get("/api/estado").json()["intervencion_abierta"]:
+                    break
+                time.sleep(0.05)
+            c.post("/api/intervencion", json={"nota": ""})
+            for _ in range(100):
+                if not c.get("/api/estado").json()["corriendo"]:
+                    break
+                time.sleep(0.05)
+        assert not any("NOTA DEL VOCERO" in p for _, p in fabrica.a.llamadas)
+
+
+class _BackendEscritor:
+    """Simula el agente headless de la fase 4 escribiendo en el repo."""
+
+    name = "stub"
+
+    def run(self, prompt, cwd, allow_commands):
+        assert allow_commands is False  # salvaguarda del Hub: jamás comandos
+        from pathlib import Path
+
+        Path(cwd, "hola.txt").write_text("hola\nmundo-hub\n", encoding="utf-8")
+        return 0, "ok"
+
+
+class TestEjecucion:
+    @staticmethod
+    def _ignorar_transcripts(repo):
+        """Como en un repo real: transcripts/ va al .gitignore (árbol limpio)."""
+        import subprocess
+
+        (repo / ".gitignore").write_text("transcripts/\n.devvating/\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-m", "ignorar transcripts"], cwd=repo,
+                       check=True, capture_output=True)
+
+    def _debatir(self, c):
+        c.post("/api/debates", json=CONFIG)
+        for _ in range(100):
+            if not c.get("/api/estado").json()["corriendo"]:
+                return
+            time.sleep(0.05)
+        pytest.fail("el debate no terminó")
+
+    def test_ejecuta_la_sintesis_y_emite_el_diff(self, git_repo):
+        self._ignorar_transcripts(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor())
+        with TestClient(app) as c:
+            self._debatir(c)
+            nombre = c.get("/api/transcripts").json()["transcripts"][0]
+            with c.websocket_connect("/ws") as ws:
+                ws.receive_json()  # historial
+                assert c.post("/api/ejecutar", json={"transcript": nombre}).status_code == 202
+                fin = None
+                for _ in range(60):
+                    msg = ws.receive_json()
+                    if msg["tipo"] == "ejecucion_fin":
+                        fin = msg
+                        break
+                    if msg["tipo"] == "ejecucion_error":
+                        pytest.fail(msg["mensaje"])
+            assert fin and fin["rama"].startswith("devvating/")
+            assert fin["archivos"] == ["hola.txt"] and "mundo-hub" in fin["diff"]
+
+    def test_repo_sucio_reporta_error_amable(self, git_repo):
+        self._ignorar_transcripts(git_repo)
+        (git_repo / "hola.txt").write_text("sucio\n", encoding="utf-8")
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor())
+        with TestClient(app) as c:
+            self._debatir(c)
+            nombre = c.get("/api/transcripts").json()["transcripts"][0]
+            with c.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                c.post("/api/ejecutar", json={"transcript": nombre})
+                for _ in range(60):
+                    msg = ws.receive_json()
+                    if msg["tipo"] == "ejecucion_error":
+                        assert "sin confirmar" in msg["mensaje"]
+                        return
+            pytest.fail("no llegó el error de árbol sucio")
+
+    def test_transcript_sin_sintesis_es_422(self, git_repo):
+        import json as _json
+
+        carpeta = git_repo / "transcripts"
+        carpeta.mkdir()
+        (carpeta / "vacio.json").write_text(_json.dumps({"synthesis": ""}), encoding="utf-8")
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            r = c.post("/api/ejecutar", json={"transcript": "vacio.json"})
+            assert r.status_code == 422

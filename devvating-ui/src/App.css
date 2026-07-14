@@ -161,3 +161,66 @@
   color: var(--accent); text-decoration: none;
 }
 .ver-reporte:hover { text-decoration: underline; }
+
+/* ------------------------------------------ intervención del vocero (F2) */
+.panel-intervencion { padding: 1.1rem 1.3rem; border-left: 4px solid var(--primary); }
+.panel-intervencion:hover { transform: none; }
+.panel-intervencion h3 {
+  display: flex; align-items: center; gap: .5rem; font-size: .95rem;
+}
+.pista-intervencion { color: var(--text-muted); font-size: .8rem; margin: .4rem 0 .7rem; }
+.fila-nota { display: flex; gap: .5rem; }
+.fila-nota input {
+  flex: 1; padding: .5rem .7rem; font: inherit; font-size: .85rem;
+  background: var(--bg-surface-elevated); color: var(--text-main);
+  border: 1px solid var(--border-color); border-radius: var(--radius-md);
+}
+.fila-nota input:focus { outline: none; border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-glow); }
+.fila-nota button {
+  display: flex; align-items: center; gap: .35rem; padding: .5rem .8rem;
+  font: inherit; font-size: .82rem; font-weight: 600; cursor: pointer;
+  background: var(--primary); color: white; border: none;
+  border-radius: var(--radius-md);
+}
+.fila-nota button:disabled { opacity: .45; cursor: not-allowed; }
+.fila-nota button.secundario {
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border-color);
+}
+.fila-nota button.secundario:hover { color: var(--text-main); }
+
+/* ------------------------------------------------ ejecución y diff (F3) */
+.panel-sintesis .ejecutar {
+  display: flex; align-items: center; gap: .4rem; padding: .45rem .9rem;
+  font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer;
+  background: transparent; color: var(--success);
+  border: 1px solid var(--success); border-radius: var(--radius-md);
+}
+.panel-sintesis .ejecutar:hover:not(:disabled) {
+  background: rgba(16, 185, 129, .12); box-shadow: 0 0 12px rgba(16, 185, 129, .25);
+}
+.panel-sintesis .ejecutar:disabled { opacity: .45; cursor: not-allowed; }
+
+.panel-ejecucion { padding: 1.1rem 1.3rem; border-left: 4px solid var(--info); }
+.panel-ejecucion:hover { transform: none; }
+.panel-ejecucion.error { border-left-color: var(--danger); }
+.panel-ejecucion.fin { border-left-color: var(--success); }
+.panel-ejecucion h3 {
+  display: flex; align-items: center; gap: .5rem; font-size: .92rem;
+  margin-bottom: .5rem;
+}
+.panel-ejecucion code {
+  background: rgba(255, 255, 255, .07); padding: .1rem .4rem;
+  border-radius: 4px; font-size: .85em;
+}
+pre.diff {
+  margin-top: .7rem; padding: .8rem; max-height: 26rem; overflow: auto;
+  background: #0d1117; border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  font-size: .78rem; line-height: 1.45; white-space: pre;
+}
+pre.diff .mas { color: #3fb950; background: rgba(63, 185, 80, .08); display: inline-block; width: 100%; }
+pre.diff .menos { color: #f85149; background: rgba(248, 81, 73, .08); display: inline-block; width: 100%; }
+pre.diff .hunk { color: var(--accent); }
+.pista-cierre { color: var(--text-muted); font-size: .78rem; margin-top: .7rem; }

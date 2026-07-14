@@ -401,9 +401,21 @@ Decidido tras un debate profundo de la propia herramienta sobre su interfaz
   D6: el motor sigue ciego a la UI (`_debate_worker` es otro consumidor de
   `on_event`), los debates pasados se ven con `reporte.render_html`
   reutilizado tal cual, y la persistencia es la misma `_save_transcript` de
-  la CLI. V1: un debate a la vez, sin intervención del vocero entre rondas
-  (para eso, la CLI `--interactivo`); el front es autocontenido (sin fuentes
-  ni CDNs externos).
+  la CLI. V1: un debate a la vez; el front es autocontenido (sin fuentes ni
+  CDNs externos).
+- **M7 v1.1 (2026-07-14, plan del primer debate corrido EN el propio Hub —
+  transcript `20260714-034445-*`)**: ciclo de vida completo en el navegador.
+  Fase 2: intervención del vocero — checkbox "interactivo", el hilo del
+  debate espera en `_esperar_nota` (cola + timeout de 5 min para no quedar
+  rehén de una pestaña cerrada) la nota que llega por `POST
+  /api/intervencion`; mismo contrato `on_intervention` de la CLI. Fase 3:
+  botón "Ejecutar plan" en la síntesis → `POST /api/ejecutar` corre el
+  `Executor` (SIEMPRE `allow_commands=False`; ese opt-in es exclusivo de la
+  CLI) y el visor de diff coloreado muestra el resultado. **Decisión del
+  vocero que el debate dejó abierta, resuelta con el default conservador**:
+  el Hub se detiene en staging + diff; commit/descartar sigue siendo manual
+  (git/CLI). Amabilidad: si el árbol está sucio solo por artefactos del
+  debate, el error sugiere gitignorear `transcripts/` y `.devvating/`.
 
 ### D7 — Banco de agentes plugable (2026-07-13)
 

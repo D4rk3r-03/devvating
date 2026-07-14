@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import {
-  FileText, Play, RefreshCw, Scale, Swords, TriangleAlert,
+  FileText, GitBranch, Hand, Play, RefreshCw, Scale, Send, Swords, TriangleAlert,
 } from "lucide-react";
 import "./App.css";
 
@@ -12,10 +12,16 @@ type Usage = {
   cost_usd: number | null;
 };
 type Msg =
-  | { tipo: "inicio"; config: { tema: string; agentes: string[]; rounds: number; profundo: boolean } }
+  | { tipo: "inicio"; config: { tema: string; agentes: string[]; rounds: number; profundo: boolean; interactivo?: boolean } }
   | { tipo: "evento"; evento: string; agente: string; texto: string | null }
   | { tipo: "fin"; sintesis: string; sintetizador: string; convergio: boolean; ronda_convergencia: number | null; usage: Record<string, Usage>; transcript: string }
-  | { tipo: "error"; mensaje: string; resets_at?: string | null; parcial?: string | null };
+  | { tipo: "error"; mensaje: string; resets_at?: string | null; parcial?: string | null }
+  | { tipo: "intervencion_pendiente"; ronda: number; timeout: number }
+  | { tipo: "intervencion_resuelta"; ronda: number; texto: string | null }
+  | { tipo: "ejecucion_inicio"; transcript: string; repo: string }
+  | { tipo: "ejecucion_evento"; evento: string; valor: string }
+  | { tipo: "ejecucion_fin"; rama: string; returncode: number; archivos: string[]; diff: string }
+  | { tipo: "ejecucion_error"; mensaje: string };
 
 type Item =
   | { clase: "separador"; texto: string }
@@ -73,8 +79,11 @@ export default function App() {
   const [files, setFiles] = useState("");
   const [rounds, setRounds] = useState(2);
   const [profundo, setProfundo] = useState(false);
+  const [interactivo, setInteractivo] = useState(false);
   const [parA, setParA] = useState("claude-cli");
   const [parB, setParB] = useState("gemini-api");
+  const [nota, setNota] = useState("");
+  const [ejecutando, setEjecutando] = useState(false);
 
   const finRef = useRef<HTMLDivElement>(null);
 
@@ -104,17 +113,39 @@ export default function App() {
     return () => ws.close();
   }, []);
 
-  // Reducción de mensajes → items del feed + turno pendiente.
-  const { items, pendiente, config, fin, error } = useMemo(() => {
+  // Reducción de mensajes → items del feed + turno pendiente + paneles.
+  const { items, pendiente, config, fin, error, intervencion, ejecucion } = useMemo(() => {
     const items: Item[] = [];
     let pendiente: { agente: string; fase: string } | null = null;
     let config: Extract<Msg, { tipo: "inicio" }>["config"] | null = null;
     let fin: Extract<Msg, { tipo: "fin" }> | null = null;
     let error: Extract<Msg, { tipo: "error" }> | null = null;
+    let intervencion: { ronda: number } | null = null;
+    let ejecucion:
+      | { estado: "corriendo"; detalle: string }
+      | { estado: "fin"; rama: string; archivos: string[]; diff: string; returncode: number }
+      | { estado: "error"; mensaje: string }
+      | null = null;
     for (const m of msgs) {
       if (m.tipo === "inicio") config = m.config;
       else if (m.tipo === "fin") { fin = m; pendiente = null; }
       else if (m.tipo === "error") { error = m; pendiente = null; }
+      else if (m.tipo === "intervencion_pendiente") intervencion = { ronda: m.ronda };
+      else if (m.tipo === "intervencion_resuelta") {
+        intervencion = null;
+        items.push({
+          clase: "aviso",
+          texto: m.texto ? `vocero (ronda ${m.ronda}): ${m.texto}` : `ronda ${m.ronda}: sin nota del vocero`,
+        });
+      }
+      else if (m.tipo === "ejecucion_inicio")
+        ejecucion = { estado: "corriendo", detalle: "preparando rama…" };
+      else if (m.tipo === "ejecucion_evento")
+        ejecucion = { estado: "corriendo", detalle: `${m.evento}: ${m.valor}` };
+      else if (m.tipo === "ejecucion_fin")
+        ejecucion = { estado: "fin", rama: m.rama, archivos: m.archivos, diff: m.diff, returncode: m.returncode };
+      else if (m.tipo === "ejecucion_error")
+        ejecucion = { estado: "error", mensaje: m.mensaje };
       else if (m.tipo === "evento") {
         const { evento, agente, texto } = m;
         if (evento === "ronda") items.push({ clase: "separador", texto: agente });
@@ -130,12 +161,16 @@ export default function App() {
         }
       }
     }
-    return { items, pendiente, config, fin, error };
+    return { items, pendiente, config, fin, error, intervencion, ejecucion };
   }, [msgs]);
 
   useEffect(() => {
+    if (ejecucion && ejecucion.estado !== "corriendo") setEjecutando(false);
+  }, [ejecucion]);
+
+  useEffect(() => {
     finRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [items.length, pendiente, fin]);
+  }, [items.length, pendiente, fin, intervencion, ejecucion]);
 
   const ladoDe = (agente: string) =>
     config && nombreAgente(config.agentes[1], alias) === agente ? "der" : "izq";
@@ -145,10 +180,32 @@ export default function App() {
     const r = await fetch("/api/debates", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tema, files, rounds, profundo, agentes: [parA, parB] }),
+      body: JSON.stringify({ tema, files, rounds, profundo, interactivo, agentes: [parA, parB] }),
     });
     if (r.ok) setCorriendo(true);
     else setAviso((await r.json()).detail ?? "No se pudo lanzar el debate.");
+  };
+
+  const enviarNota = async (texto: string) => {
+    await fetch("/api/intervencion", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nota: texto }),
+    });
+    setNota("");
+  };
+
+  const ejecutarPlan = async (transcript: string) => {
+    setEjecutando(true);
+    const r = await fetch("/api/ejecutar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript }),
+    });
+    if (!r.ok) {
+      setEjecutando(false);
+      setAviso((await r.json()).detail ?? "No se pudo lanzar la ejecución.");
+    }
   };
 
   return (
@@ -186,6 +243,11 @@ export default function App() {
             <input type="checkbox" checked={profundo}
               onChange={(e) => setProfundo(e.target.checked)} disabled={corriendo} />
             profundo
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={interactivo}
+              onChange={(e) => setInteractivo(e.target.checked)} disabled={corriendo} />
+            interactivo
           </label>
         </div>
         <button className="lanzar" onClick={lanzar} disabled={corriendo || !tema.trim()}>
@@ -240,6 +302,25 @@ export default function App() {
           )}
           {pendiente && <Pendiente agente={pendiente.agente} fase={pendiente.fase} />}
 
+          {intervencion && (
+            <div className="panel-intervencion glass-panel animate-fade-in">
+              <h3><Hand size={16} /> Tu turno, vocero — antes de la ronda {intervencion.ronda}</h3>
+              <p className="pista-intervencion">Inyecta una directriz para los agentes,
+                o continúa sin nota. El debate espera.</p>
+              <div className="fila-nota">
+                <input value={nota} onChange={(e) => setNota(e.target.value)}
+                  placeholder="ej.: prioricen la opción con menos dependencias…"
+                  onKeyDown={(e) => e.key === "Enter" && enviarNota(nota)} autoFocus />
+                <button onClick={() => enviarNota(nota)} disabled={!nota.trim()}>
+                  <Send size={14} /> Enviar
+                </button>
+                <button className="secundario" onClick={() => enviarNota("")}>
+                  Continuar sin nota
+                </button>
+              </div>
+            </div>
+          )}
+
           {error && (
             <div className="panel-error glass-panel">
               <h3><TriangleAlert size={16} /> Debate interrumpido</h3>
@@ -266,7 +347,51 @@ export default function App() {
                   target="_blank" rel="noreferrer" className="ver-reporte">
                   <FileText size={14} /> reporte completo
                 </a>
+                <button className="ejecutar" disabled={ejecutando || corriendo}
+                  onClick={() => ejecutarPlan(fin.transcript)}
+                  title="Aplica el plan en una rama nueva; nada se commitea.">
+                  <GitBranch size={14} /> {ejecutando ? "Ejecutando…" : "Ejecutar plan"}
+                </button>
               </footer>
+            </div>
+          )}
+
+          {ejecucion && (
+            <div className={`panel-ejecucion glass-panel animate-fade-in ${ejecucion.estado}`}>
+              {ejecucion.estado === "corriendo" && (
+                <h3><RefreshCw size={16} className="girando" /> Ejecutando el plan — {ejecucion.detalle}</h3>
+              )}
+              {ejecucion.estado === "error" && (
+                <>
+                  <h3><TriangleAlert size={16} /> La ejecución no pudo correr</h3>
+                  <p>{ejecucion.mensaje}</p>
+                </>
+              )}
+              {ejecucion.estado === "fin" && (
+                <>
+                  <h3><GitBranch size={16} /> Cambios en staging · rama <code>{ejecucion.rama}</code></h3>
+                  {ejecucion.returncode !== 0 && (
+                    <p className="aviso-feed">el backend salió con código {ejecucion.returncode}</p>
+                  )}
+                  {ejecucion.archivos.length === 0 ? (
+                    <p>El ejecutor no produjo cambios.</p>
+                  ) : (
+                    <>
+                      <p>{ejecucion.archivos.length} archivo(s): {ejecucion.archivos.join(", ")}</p>
+                      <pre className="diff">{ejecucion.diff.split("\n").map((l, i) => (
+                        <span key={i} className={
+                          l.startsWith("+") && !l.startsWith("+++") ? "mas"
+                          : l.startsWith("-") && !l.startsWith("---") ? "menos"
+                          : l.startsWith("@@") ? "hunk" : ""
+                        }>{l + "\n"}</span>
+                      ))}</pre>
+                    </>
+                  )}
+                  <p className="pista-cierre">Nada se ha commiteado. Para conservar:{" "}
+                    <code>git commit</code> · para descartar:{" "}
+                    <code>git branch -D {ejecucion.rama}</code> (tras volver a tu rama).</p>
+                </>
+              )}
             </div>
           )}
           <div ref={finRef} />
