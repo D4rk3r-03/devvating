@@ -64,6 +64,15 @@ class ClaudeAdapter:
             {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
         ]
 
+        # Breakpoint MÓVIL sobre el historial: donde el prefijo estable (system
+        # ~500 tokens) casi nunca supera el mínimo cacheable, los tool_results
+        # sí — traen contenidos de archivos (read_file) que se reenvían en cada
+        # iteración del bucle. Marcamos el tool_results más reciente para que la
+        # siguiente iteración relea todo el prefijo (system+tools+mensajes) a
+        # ~0.1x, y quitamos la marca del anterior para no pasar del tope de 4
+        # breakpoints. Total vivo: 1 (system) + 1 (este) = 2.
+        cache_previo: dict | None = None
+
         for _ in range(self._max_iterations):
             try:
                 response = self._client.messages.create(
@@ -105,6 +114,11 @@ class ClaudeAdapter:
 
             # Continuar el bucle: eco de la respuesta + resultados de herramientas.
             messages.append({"role": "assistant", "content": response.content})
+            if tool_results:
+                if cache_previo is not None:
+                    cache_previo.pop("cache_control", None)
+                tool_results[-1]["cache_control"] = {"type": "ephemeral"}
+                cache_previo = tool_results[-1]
             messages.append({"role": "user", "content": tool_results})
 
         self._cerrar_turno(total)
