@@ -36,7 +36,7 @@ except ImportError as exc:  # pragma: no cover - guard de instalación
     ) from exc
 
 from . import agentes as banco
-from . import reporte, rotation
+from . import reporte, roles, rotation
 from .config import Config
 from .debate import _save_transcript
 from .executor import ClaudeCodeBackend, ExecutionPlan, Executor, ExecutorError
@@ -96,7 +96,17 @@ def _debate_worker(
             emitir({"tipo": "intervencion_resuelta", "ronda": ronda, "texto": nota})
             return nota
 
-    orch = Orchestrator(agente_a, agente_b, repo_root=repo, on_event=on_event)
+    sesgos = [s for s in (config.get("sesgos") or []) if isinstance(s, str)]
+    try:
+        biases, _ = roles.resolver_biases(sesgos, banco.es_autodebate(agente_a, agente_b))
+    except ValueError as exc:
+        emitir({"tipo": "error", "mensaje": str(exc)})
+        emitir({"tipo": "cerrado"})
+        return
+
+    orch = Orchestrator(
+        agente_a, agente_b, repo_root=repo, on_event=on_event, biases=biases
+    )
     topic = DebateTopic(prompt=config["tema"], context_hint=config.get("files", ""))
     estado_rotacion = rotation.load(repo)
 

@@ -3,13 +3,18 @@
 Uso:
     devvating debate "tu tema"  [--files "a.py, b.py"] [--repo .]
         [--rounds N] [--synthesizer <agente>|auto] [--agentes a,b]
-        [--profundo] [--interactivo]
+        [--sesgos audaz,cauto] [--profundo] [--interactivo]
     devvating debate --resume transcripts/<x>.partial.json  [--agentes a,b]
         (reanuda un debate interrumpido sin repetir los turnos ya pagados)
 
 Los defaults (rondas, modo profundo, repo, files, rotación) se toman de
 `.devvating.json` si existe; los flags CLI tienen prioridad. Con
 `--synthesizer auto` (por defecto) el sintetizador rota entre debates (D3).
+
+Auto-debate (mismo agente dos veces, p. ej. `--agentes claude-cli,claude-cli`):
+el par se desambigua a `claude#1`/`claude#2` y, sin `--sesgos` explícitos, se
+les asigna el par de inclinaciones por defecto (audaz/cauto) para que no sea un
+eco puro. La divergencia real la aporta el sesgo, no la identidad separada.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from . import agentes as banco
+from . import roles
 from . import rotation
 from .adapters.base import AgentAdapter, SessionLimitError, TurnUsage
 from .appconfig import ProjectConfig
@@ -33,6 +39,11 @@ from .config import Config
 from .orchestrator import DebateAbortedError, DebateSession, DebateTopic, Orchestrator, Turn
 
 _COLORS = {"claude": "cyan", "gemini": "magenta", "antigravity": "blue", "kimi": "green"}
+
+
+def _color(agente: str) -> str:
+    """Color del agente, tolerando el sufijo '#n' de un auto-debate."""
+    return _COLORS.get(agente.split("#")[0], "white")
 
 
 def _save_transcript(session: DebateSession, repo_root: str, parcial: bool = False) -> Path:
@@ -108,6 +119,14 @@ def main(argv: list[str] | None = None) -> int:
             f"Roster: {', '.join(banco.nombres())}. Ej: --agentes antigravity,claude-cli"
         ),
     )
+    parser.add_argument(
+        "--sesgos",
+        default=None,
+        help=(
+            "Inclinación por agente, separadas por coma, para romper el eco de un "
+            f"auto-debate. Perfiles: {', '.join(roles.SESGOS)}. Ej: --sesgos audaz,cauto"
+        ),
+    )
     parser.add_argument("--profundo", action="store_true", help="Ronda de inversión (~2x coste).")
     parser.add_argument("--interactivo", action="store_true", help="Nota del vocero por ronda.")
     parser.add_argument(
@@ -156,6 +175,22 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[red]{exc}[/red]")
         return 1
 
+    # Sesgos por agente (rompen el eco de un auto-debate). --sesgos > config;
+    # si es auto-debate sin sesgos, se aplica el par por defecto (audaz/cauto)
+    # para que 'claude vs claude' no sea un eco puro. En un par de familias
+    # distintas sin sesgos, se mantiene el comportamiento clásico (None).
+    if args.sesgos is not None:
+        nombres_sesgos = [s.strip() for s in args.sesgos.split(",") if s.strip()]
+    else:
+        nombres_sesgos = list(pc.sesgos)
+    try:
+        biases, etiqueta_sesgos = roles.resolver_biases(
+            nombres_sesgos, banco.es_autodebate(agente_a, agente_b)
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+
     # Resolución del sintetizador (rotación automática, D3 capa 1).
     auto_rotate = args.synthesizer == "auto" and pc.auto_rotate
     if auto_rotate:
@@ -183,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def _iniciar_latido(agente: str, fase: str) -> None:
         _detener_latido()
-        color = _COLORS.get(agente, "white")
+        color = _color(agente)
         prog = Progress(
             SpinnerColumn(),
             TextColumn(f"[{color}]{agente}[/{color}] · {fase}…"),
@@ -207,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         if evento == "reintento":
             console.print(f"[yellow]⟳ {agente}: {texto}[/yellow]")
             return
-        color = _COLORS.get(agente, "white")
+        color = _color(agente)
         if evento.endswith("_inicio"):
             _iniciar_latido(agente, evento.removesuffix("_inicio"))
         elif evento.endswith("_fin") and texto is not None:
@@ -227,7 +262,9 @@ def main(argv: list[str] | None = None) -> int:
         ).strip()
         return nota or None
 
-    orch = Orchestrator(agente_a, agente_b, repo_root=repo, on_event=on_event)
+    orch = Orchestrator(
+        agente_a, agente_b, repo_root=repo, on_event=on_event, biases=biases
+    )
     topic = DebateTopic(prompt=args.tema, context_hint=files)
 
     console.rule("[bold]DEVVATING · Debate")
@@ -235,7 +272,8 @@ def main(argv: list[str] | None = None) -> int:
     console.print(
         f"[dim]rondas≤{rounds} · profundo={deep} · "
         f"sintetizador={'auto' if auto_rotate else args.synthesizer} · "
-        f"agentes: {nombres_par[0]} vs {nombres_par[1]}[/dim]\n"
+        f"agentes: {agente_a.name} vs {agente_b.name}"
+        f"{f' · sesgos: {etiqueta_sesgos}' if etiqueta_sesgos else ''}[/dim]\n"
     )
 
     try:

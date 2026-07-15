@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from devvating import roles
 from devvating.orchestrator import DebateTopic, Orchestrator, _parse_verdict
 from tests.conftest import StubAdapter
 
@@ -106,3 +109,49 @@ class TestFlujo:
             "propuesta", "propuesta", "replica", "replica", "sintesis",
         ]
         assert all(t.verdict == "si" for t in s.turns if t.phase == "replica")
+
+
+class TestConSesgo:
+    def test_neutral_devuelve_el_rol_intacto(self):
+        assert roles.con_sesgo(roles.PROPONENTE, "") == roles.PROPONENTE
+        assert roles.con_sesgo(roles.PROPONENTE, roles.SESGOS["neutral"]) == roles.PROPONENTE
+
+    def test_sesgo_se_anexa_al_rol(self):
+        compuesto = roles.con_sesgo(roles.REPLICA, roles.SESGOS["audaz"])
+        assert compuesto.startswith(roles.REPLICA)
+        assert roles.SESGOS["audaz"] in compuesto
+
+
+class TestSesgos:
+    def test_sesgo_en_propuesta_y_replica_no_en_sintesis(self):
+        # El sesgo colorea propuesta y réplica; la síntesis debe ser neutral.
+        a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"])
+        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+        orch = Orchestrator(a, b, repo_root=".", biases=["SESGO_A", "SESGO_B"])
+        orch.run(TOPIC, max_rounds=1, synthesizer_index=0)
+        assert "SESGO_A" in a.llamadas[0][0]      # propuesta
+        assert "SESGO_A" in a.llamadas[1][0]      # réplica
+        assert "SESGO_A" not in a.llamadas[2][0]  # síntesis, neutral
+        assert "SESGO_B" in b.llamadas[0][0] and "SESGO_B" in b.llamadas[1][0]
+
+    def test_inversion_no_recibe_sesgo(self):
+        # La inversión (steelman) ya invierte por diseño: no debe llevar sesgo.
+        a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "steelman A", "síntesis"])
+        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]", "steelman B"])
+        orch = Orchestrator(a, b, repo_root=".", biases=["SESGO_A", "SESGO_B"])
+        orch.run(TOPIC, max_rounds=1, deep_mode=True, synthesizer_index=0)
+        # a: 0 propuesta, 1 réplica, 2 inversión, 3 síntesis.
+        assert "SESGO_A" not in a.llamadas[2][0]
+
+    def test_sin_sesgo_es_comportamiento_clasico(self):
+        a, _, _ = _run(
+            ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"],
+            ["B0", "B1 [CONVERGENCIA: SÍ]"],
+            max_rounds=1,
+        )
+        assert a.llamadas[0][0] == roles.PROPONENTE  # rol puro, sin añadidos
+
+    def test_biases_de_largo_incorrecto_falla(self):
+        a, b = StubAdapter("claude", []), StubAdapter("gemini", [])
+        with pytest.raises(ValueError, match="una por agente"):
+            Orchestrator(a, b, biases=["solo-uno"])

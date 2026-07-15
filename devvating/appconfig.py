@@ -35,6 +35,9 @@ class ProjectConfig:
     # D7 (M8): par de debatientes por nombre de roster (p. ej.
     # ["antigravity", "claude-cli"]). Vacío = usar el par clásico de D5.
     agentes: list[str] = field(default_factory=list)
+    # Inclinación por agente para romper el eco de un auto-debate (nombres de
+    # perfil de roles.SESGOS, p. ej. ["audaz", "cauto"]). Vacío = sin sesgo.
+    sesgos: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, start: str = ".") -> "ProjectConfig":
@@ -47,6 +50,8 @@ class ProjectConfig:
             backends = data.get("backends") or {}
             crudos = data.get("agentes") or []
             agentes = [str(a) for a in crudos if isinstance(a, str)] if isinstance(crudos, list) else []
+            crudos_s = data.get("sesgos") or []
+            sesgos = [str(s) for s in crudos_s if isinstance(s, str)] if isinstance(crudos_s, list) else []
             return cls(
                 rounds=int(data.get("rounds", 2)),
                 deep_mode=bool(data.get("deep_mode", False)),
@@ -56,6 +61,7 @@ class ProjectConfig:
                 claude_backend=_backend(backends.get("claude", "api")),
                 gemini_backend=_backend(backends.get("gemini", "api")),
                 agentes=agentes,
+                sesgos=sesgos,
             )
         except (OSError, ValueError, TypeError, AttributeError):
             return cls()

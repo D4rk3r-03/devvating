@@ -103,12 +103,24 @@ class Orchestrator:
         on_event: EventCb | None = None,
         retry_waits: tuple[int, ...] = ESPERAS_REINTENTO,
         sleep: Callable[[float], None] = time.sleep,
+        biases: list[str] | None = None,
     ) -> None:
         self.agents = [agent_a, agent_b]
         self.repo_root = repo_root
         self._on_event = on_event or (lambda *_: None)
         self._retry_waits = retry_waits
         self._sleep = sleep
+        # Sesgo por agente (texto ya resuelto), paralelo a self.agents. Vacío =
+        # sin sesgo (comportamiento clásico). Solo aplica en propuesta y réplica.
+        if biases is not None and len(biases) != len(self.agents):
+            raise ValueError(
+                f"biases debe tener {len(self.agents)} entradas (una por agente); "
+                f"recibí {len(biases)}."
+            )
+        self._biases = list(biases) if biases else ["" for _ in self.agents]
+
+    def _bias_de(self, agent: AgentAdapter) -> str:
+        return self._biases[self.agents.index(agent)]
 
     def _converse_con_reintento(
         self, agent: AgentAdapter, system: str, prompt: str, registry: ToolRegistry
@@ -197,7 +209,10 @@ class Orchestrator:
                 session.turns.append(existente)
             else:
                 text = self._converse_con_reintento(
-                    agent, roles.PROPONENTE, roles.prompt_propuesta(topic), registry
+                    agent,
+                    roles.con_sesgo(roles.PROPONENTE, self._bias_de(agent)),
+                    roles.prompt_propuesta(topic),
+                    registry,
                 )
                 session.turns.append(
                     Turn(0, "propuesta", agent.name, text, usage=self._usage_de(agent))
@@ -225,7 +240,7 @@ class Orchestrator:
                 else:
                     raw = self._converse_con_reintento(
                         agent,
-                        roles.REPLICA,
+                        roles.con_sesgo(roles.REPLICA, self._bias_de(agent)),
                         roles.prompt_replica(
                             topic, positions[agent.name], positions[other.name], other.name, nota
                         ),

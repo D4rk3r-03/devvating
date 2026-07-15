@@ -75,10 +75,14 @@ def crear(nombre: str, cfg: Config, repo: str) -> AgentAdapter:
 
 
 def par(dos_nombres: list[str], cfg: Config, repo: str) -> tuple[AgentAdapter, AgentAdapter]:
-    """Crea el par de debatientes, validando que sean exactamente 2 y distintos.
+    """Crea el par de debatientes, validando que sean exactamente 2.
 
     Los nombres de adaptador (agent.name) deben diferir: el orquestador y el
-    transcript indexan las posturas por ese nombre.
+    transcript indexan las posturas por ese nombre. Cuando ambos resuelven al
+    mismo nombre (auto-debate, p. ej. claude vs claude) NO se rechaza: se
+    desambiguan con sufijos '#1'/'#2'. El auto-debate solo aporta si además se
+    le asigna un sesgo por agente (roles.SESGOS); la identidad separada es solo
+    la condición para que el transcript no colisione.
     """
     if len(dos_nombres) != 2:
         raise ValueError(
@@ -88,9 +92,10 @@ def par(dos_nombres: list[str], cfg: Config, repo: str) -> tuple[AgentAdapter, A
     a = crear(dos_nombres[0], cfg, repo)
     b = crear(dos_nombres[1], cfg, repo)
     if a.name == b.name:
-        raise ValueError(
-            f"Los dos agentes resuelven al mismo nombre '{a.name}' "
-            f"({dos_nombres[0]} y {dos_nombres[1]}); el debate necesita "
-            "identidades distintas."
-        )
+        a.name, b.name = f"{a.name}#1", f"{b.name}#2"
     return a, b
+
+
+def es_autodebate(a: AgentAdapter, b: AgentAdapter) -> bool:
+    """True si el par se desambiguó por ser el mismo agente dos veces."""
+    return a.name.endswith("#1") and b.name.endswith("#2")

@@ -53,9 +53,17 @@ class TestRoster:
         with pytest.raises(ValueError, match="exactamente 2"):
             banco.par(["kimi", "claude-cli", "gemini-api"], CFG, str(tmp_path))
 
-    def test_par_rechaza_identidades_repetidas(self, tmp_path):
-        with pytest.raises(ValueError, match="mismo nombre 'claude'"):
-            banco.par(["claude-api", "claude-cli"], CFG, str(tmp_path))
+    def test_par_autodebate_desambigua_identidades(self, tmp_path):
+        # Mismo agente dos veces (auto-debate): en vez de rechazar, se
+        # desambiguan los nombres para que el transcript no colisione.
+        a, b = banco.par(["claude-cli", "claude-cli"], CFG, str(tmp_path))
+        assert (a.name, b.name) == ("claude#1", "claude#2")
+        assert a.name != b.name
+        assert banco.es_autodebate(a, b)
+
+    def test_par_familias_distintas_no_es_autodebate(self, tmp_path):
+        a, b = banco.par(["antigravity", "kimi"], CFG, str(tmp_path))
+        assert not banco.es_autodebate(a, b)
 
     def test_par_valido_cruzando_familias(self, tmp_path):
         a, b = banco.par(["antigravity", "kimi"], CFG, str(tmp_path))
@@ -127,3 +135,15 @@ class TestConfigAgentes:
             json.dumps({"agentes": [1, None, "kimi"]}), encoding="utf-8"
         )
         assert ProjectConfig.load(str(tmp_path)).agentes == ["kimi"]
+
+    def test_lee_lista_de_sesgos(self, tmp_path):
+        (tmp_path / ".devvating.json").write_text(
+            json.dumps({"sesgos": ["audaz", "cauto"]}), encoding="utf-8"
+        )
+        assert ProjectConfig.load(str(tmp_path)).sesgos == ["audaz", "cauto"]
+
+    def test_sesgos_invalidos_caen_a_vacio(self, tmp_path):
+        (tmp_path / ".devvating.json").write_text(
+            json.dumps({"sesgos": "no-una-lista"}), encoding="utf-8"
+        )
+        assert ProjectConfig.load(str(tmp_path)).sesgos == []

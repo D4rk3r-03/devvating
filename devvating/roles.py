@@ -20,6 +20,75 @@ if TYPE_CHECKING:
 VERDICT_SI = "[CONVERGENCIA: SÍ]"
 VERDICT_NO = "[CONVERGENCIA: NO]"
 
+# --- Sesgos de agente (inclinaciones para inducir divergencia) ----------------
+# Dos instancias del MISMO modelo convergen en falso (eco): comparten pesos y
+# puntos ciegos, así que la divergencia hay que INDUCIRLA. Un sesgo asignado le
+# da a cada agente una inclinación honesta y distinta, rompiendo el eco de un
+# auto-debate (Claude vs Claude). Se inyecta SOLO en propuesta y réplica: la
+# inversión ya invierte por diseño y la síntesis debe permanecer neutral.
+# "neutral" ("") = comportamiento clásico sin sesgo.
+SESGOS: dict[str, str] = {
+    "neutral": "",
+    "audaz": (
+        "INCLINACIÓN ASIGNADA — audacia técnica: favorece la solución más "
+        "ambiciosa y limpia aunque cueste más trabajo, empuja el cambio y "
+        "cuestiona el statu quo. Adóptala con honestidad; no la finjas ni la "
+        "lleves al absurdo."
+    ),
+    "cauto": (
+        "INCLINACIÓN ASIGNADA — prudencia: prioriza el menor riesgo, la "
+        "compatibilidad y el costo de mantenimiento; busca qué puede salir mal "
+        "antes de aceptar una propuesta. Adóptala con honestidad; no la finjas "
+        "ni la lleves al absurdo."
+    ),
+}
+
+# Par por defecto para un auto-debate sin sesgos explícitos (dos inclinaciones
+# opuestas: una empuja, la otra frena).
+DEFAULT_SESGOS: tuple[str, str] = ("audaz", "cauto")
+
+
+def con_sesgo(base: str, sesgo: str) -> str:
+    """Compone un system prompt de rol con la inclinación de un agente.
+
+    `sesgo` es el TEXTO literal de la inclinación (ya resuelto); vacío devuelve
+    el rol intacto — el comportamiento clásico, sin sesgo."""
+    if not sesgo:
+        return base
+    return f"{base}\n\n{sesgo}"
+
+
+def resolver_sesgos(nombres: list[str]) -> list[str]:
+    """Nombres de perfil → textos de sesgo, validando contra SESGOS."""
+    if len(nombres) != 2:
+        raise ValueError(
+            f"Los sesgos deben ser exactamente 2 (uno por agente); recibí {len(nombres)}."
+        )
+    textos = []
+    for n in nombres:
+        clave = n.strip().lower()
+        if clave not in SESGOS:
+            raise ValueError(
+                f"Sesgo desconocido: '{n}'. Perfiles: {', '.join(SESGOS)}."
+            )
+        textos.append(SESGOS[clave])
+    return textos
+
+
+def resolver_biases(
+    nombres_sesgos: list[str], autodebate: bool
+) -> tuple[list[str] | None, str | None]:
+    """Resuelve los sesgos de un par a (textos | None, etiqueta legible | None).
+
+    Sesgos explícitos → se validan y usan. Sin ellos, un auto-debate cae al par
+    DEFAULT_SESGOS (para que 'claude vs claude' no sea eco puro); un par de
+    familias distintas se queda sin sesgo (None, comportamiento clásico)."""
+    if nombres_sesgos:
+        return resolver_sesgos(nombres_sesgos), "/".join(nombres_sesgos)
+    if autodebate:
+        return [SESGOS[k] for k in DEFAULT_SESGOS], "/".join(DEFAULT_SESGOS) + " (auto)"
+    return None, None
+
 # --- System prompts por rol ---------------------------------------------------
 
 PROPONENTE = (
