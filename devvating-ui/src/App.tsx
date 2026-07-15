@@ -289,105 +289,116 @@ export default function App() {
   return (
     <div className="app-container">
       <aside className="sidebar">
-        <h1 className="text-gradient marca"><Swords size={20} /> Devvating Hub</h1>
-        <p className="lema">Dos agentes debaten sobre tu código. Tú arbitras.</p>
+        <header className="sidebar-header">
+          <h1 className="text-gradient marca"><Swords size={20} /> Devvating Hub</h1>
+          <p className="lema">Dos agentes debaten sobre tu código. Tú arbitras.</p>
+        </header>
 
-        <label>Tema del debate
-          <textarea value={tema} onChange={(e) => setTema(e.target.value)}
-            rows={4} placeholder="¿Conviene X o Y?" disabled={corriendo} />
-        </label>
-        <label>Archivos pista (opcional)
-          <input value={files} onChange={(e) => setFiles(e.target.value)}
-            placeholder="src/a.py, src/b.py" disabled={corriendo} />
-        </label>
-        <div className="fila">
-          <label>Agente A
-            <select value={parA} onChange={(e) => setParA(e.target.value)} disabled={corriendo}>
-              {roster.map((n) => <option key={n}>{n}</option>)}
-            </select>
-          </label>
-          <label>Agente B
-            <select value={parB} onChange={(e) => setParB(e.target.value)} disabled={corriendo}>
-              {roster.map((n) => <option key={n}>{n}</option>)}
-            </select>
-          </label>
-        </div>
-        {esAutodebate && (
-          <>
-            <p className="pista-sesgos">
-              <Scale size={13} /> Mismo agente dos veces: asígnales inclinaciones
-              opuestas para que debatan de verdad y no hagan eco.
-            </p>
+        <div className="sidebar-scroll">
+          <section className="sidebar-seccion">
+            <h2 className="titulo-lista"><Play size={13} /> Nuevo debate</h2>
+            <label>Tema del debate
+              <textarea value={tema} onChange={(e) => setTema(e.target.value)}
+                rows={3} placeholder="¿Conviene X o Y?" disabled={corriendo} />
+            </label>
+            <label>Archivos pista (opcional)
+              <input value={files} onChange={(e) => setFiles(e.target.value)}
+                placeholder="src/a.py, src/b.py" disabled={corriendo} />
+            </label>
             <div className="fila">
-              <label>Sesgo A
-                <select value={sesgoA} onChange={(e) => setSesgoA(e.target.value)} disabled={corriendo}>
-                  {sesgosDisp.map((s) => <option key={s}>{s}</option>)}
+              <label>Agente A
+                <select value={parA} onChange={(e) => setParA(e.target.value)} disabled={corriendo}>
+                  {roster.map((n) => <option key={n}>{n}</option>)}
                 </select>
               </label>
-              <label>Sesgo B
-                <select value={sesgoB} onChange={(e) => setSesgoB(e.target.value)} disabled={corriendo}>
-                  {sesgosDisp.map((s) => <option key={s}>{s}</option>)}
+              <label>Agente B
+                <select value={parB} onChange={(e) => setParB(e.target.value)} disabled={corriendo}>
+                  {roster.map((n) => <option key={n}>{n}</option>)}
                 </select>
               </label>
             </div>
-          </>
-        )}
-        <div className="fila">
-          <label>Rondas
-            <input type="number" min={1} max={5} value={rounds}
-              onChange={(e) => setRounds(+e.target.value)} disabled={corriendo} />
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={profundo}
-              onChange={(e) => setProfundo(e.target.checked)} disabled={corriendo} />
-            profundo
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={interactivo}
-              onChange={(e) => setInteractivo(e.target.checked)} disabled={corriendo} />
-            interactivo
-          </label>
+            {esAutodebate && (
+              <>
+                <p className="pista-sesgos">
+                  <Scale size={13} /> Mismo agente dos veces: asígnales inclinaciones
+                  opuestas para que debatan de verdad y no hagan eco.
+                </p>
+                <div className="fila">
+                  <label>Sesgo A
+                    <select value={sesgoA} onChange={(e) => setSesgoA(e.target.value)} disabled={corriendo}>
+                      {sesgosDisp.map((s) => <option key={s}>{s}</option>)}
+                    </select>
+                  </label>
+                  <label>Sesgo B
+                    <select value={sesgoB} onChange={(e) => setSesgoB(e.target.value)} disabled={corriendo}>
+                      {sesgosDisp.map((s) => <option key={s}>{s}</option>)}
+                    </select>
+                  </label>
+                </div>
+              </>
+            )}
+            <div className="fila">
+              <label>Rondas
+                <input type="number" min={1} max={5} value={rounds}
+                  onChange={(e) => setRounds(+e.target.value)} disabled={corriendo} />
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={profundo}
+                  onChange={(e) => setProfundo(e.target.checked)} disabled={corriendo} />
+                profundo
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={interactivo}
+                  onChange={(e) => setInteractivo(e.target.checked)} disabled={corriendo} />
+                interactivo
+              </label>
+            </div>
+            <button className="lanzar" onClick={lanzar} disabled={corriendo || !tema.trim()}>
+              <Play size={16} /> {corriendo ? "Debate en curso…" : "Lanzar debate"}
+            </button>
+            {aviso && <p className="aviso-form"><TriangleAlert size={14} /> {aviso}</p>}
+          </section>
+
+          <section className="sidebar-seccion">
+            <h2 className="titulo-lista"><FileText size={14} /> Debates anteriores</h2>
+            <ul className="lista-transcripts">
+              {transcripts.map((t) => (
+                <li key={t}>
+                  <a href={`/api/transcripts/${encodeURIComponent(t)}/html`} target="_blank" rel="noreferrer"
+                    title={t}>{t.replace(/\.json$/, "").slice(16)}</a>
+                </li>
+              ))}
+              {transcripts.length === 0 && <li className="vacio">aún ninguno</li>}
+            </ul>
+          </section>
+
+          <section className="sidebar-seccion">
+            <h2 className="titulo-lista"><GitBranch size={14} /> Ramas de ejecución</h2>
+            <ul className="lista-ramas">
+              {ramas.map((r) => (
+                <li key={r.nombre} className={r.actual ? "actual" : ""}>
+                  <div className="rama-info">
+                    <span className="rama-nombre" title={r.nombre}>
+                      {r.nombre.replace(/^devvating\//, "")}
+                    </span>
+                    <span className="rama-asunto" title={r.asunto}>
+                      {r.asunto || "(sin commit)"}
+                    </span>
+                  </div>
+                  {r.actual ? (
+                    <span className="rama-actual" title="rama actual">aquí</span>
+                  ) : (
+                    <button className="rama-borrar" title="Borrar rama"
+                      onClick={() => borrarRama(r.nombre)}>
+                      <Trash2 size={13} />
+                    </button>
+                  )}
+                </li>
+              ))}
+              {ramas.length === 0 && <li className="vacio">ninguna</li>}
+            </ul>
+          </section>
         </div>
-        <button className="lanzar" onClick={lanzar} disabled={corriendo || !tema.trim()}>
-          <Play size={16} /> {corriendo ? "Debate en curso…" : "Lanzar debate"}
-        </button>
-        {aviso && <p className="aviso-form"><TriangleAlert size={14} /> {aviso}</p>}
-
-        <h2 className="titulo-lista"><FileText size={14} /> Debates anteriores</h2>
-        <ul className="lista-transcripts">
-          {transcripts.map((t) => (
-            <li key={t}>
-              <a href={`/api/transcripts/${encodeURIComponent(t)}/html`} target="_blank" rel="noreferrer"
-                title={t}>{t.replace(/\.json$/, "").slice(16)}</a>
-            </li>
-          ))}
-          {transcripts.length === 0 && <li className="vacio">aún ninguno</li>}
-        </ul>
-
-        <h2 className="titulo-lista"><GitBranch size={14} /> Ramas de ejecución</h2>
-        <ul className="lista-ramas">
-          {ramas.map((r) => (
-            <li key={r.nombre} className={r.actual ? "actual" : ""}>
-              <div className="rama-info">
-                <span className="rama-nombre" title={r.nombre}>
-                  {r.nombre.replace(/^devvating\//, "")}
-                </span>
-                <span className="rama-asunto" title={r.asunto}>
-                  {r.asunto || "(sin commit)"}
-                </span>
-              </div>
-              {r.actual ? (
-                <span className="rama-actual" title="rama actual">aquí</span>
-              ) : (
-                <button className="rama-borrar" title="Borrar rama"
-                  onClick={() => borrarRama(r.nombre)}>
-                  <Trash2 size={13} />
-                </button>
-              )}
-            </li>
-          ))}
-          {ramas.length === 0 && <li className="vacio">ninguna</li>}
-        </ul>
       </aside>
 
       <main className="main-content">
