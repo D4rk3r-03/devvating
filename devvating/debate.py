@@ -179,17 +179,21 @@ def main(argv: list[str] | None = None) -> int:
     # si es auto-debate sin sesgos, se aplica el par por defecto (audaz/cauto)
     # para que 'claude vs claude' no sea un eco puro. En un par de familias
     # distintas sin sesgos, se mantiene el comportamiento clásico (None).
+    autodebate = banco.es_autodebate(agente_a, agente_b)
     if args.sesgos is not None:
         nombres_sesgos = [s.strip() for s in args.sesgos.split(",") if s.strip()]
     else:
         nombres_sesgos = list(pc.sesgos)
     try:
-        biases, etiqueta_sesgos = roles.resolver_biases(
-            nombres_sesgos, banco.es_autodebate(agente_a, agente_b)
-        )
+        biases, etiqueta_sesgos = roles.resolver_biases(nombres_sesgos, autodebate)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         return 1
+
+    # En un auto-debate exigimos al menos 2 rondas antes de honrar la
+    # convergencia: evita que un eco declare acuerdo en la primera réplica.
+    # Clamp a `rounds` para no romper si el vocero forzó --rounds 1.
+    min_rounds = min(2, rounds) if autodebate else 1
 
     # Resolución del sintetizador (rotación automática, D3 capa 1).
     auto_rotate = args.synthesizer == "auto" and pc.auto_rotate
@@ -280,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         session = orch.run(
             topic,
             max_rounds=rounds,
+            min_rounds=min_rounds,
             synthesizer_index=synth_index,
             deep_mode=deep,
             on_intervention=on_intervention,

@@ -155,3 +155,25 @@ class TestSesgos:
         a, b = StubAdapter("claude", []), StubAdapter("gemini", [])
         with pytest.raises(ValueError, match="una por agente"):
             Orchestrator(a, b, biases=["solo-uno"])
+
+
+class TestMinRounds:
+    def test_convergencia_temprana_se_ignora_bajo_min_rounds(self):
+        # Ambos declaran SÍ en la ronda 1, pero min_rounds=2 (auto-debate)
+        # obliga a seguir: el eco no puede cerrar el debate en la primera réplica.
+        _, _, s = _run(
+            ["A0", "A1 [CONVERGENCIA: SÍ]", "A2 [CONVERGENCIA: SÍ]", "síntesis"],
+            ["B0", "B1 [CONVERGENCIA: SÍ]", "B2 [CONVERGENCIA: SÍ]"],
+            max_rounds=2,
+            min_rounds=2,
+        )
+        assert s.converged and s.converged_round == 2 and s.rounds_run == 2
+
+    def test_default_permite_corte_en_ronda_1(self):
+        # min_rounds=1 (default, debate clásico): la convergencia en ronda 1 vale.
+        _, _, s = _run(
+            ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"],
+            ["B0", "B1 [CONVERGENCIA: SÍ]"],
+            max_rounds=3,
+        )
+        assert s.converged and s.converged_round == 1

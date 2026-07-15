@@ -160,6 +160,7 @@ class Orchestrator:
         topic: DebateTopic,
         *,
         max_rounds: int = 2,
+        min_rounds: int = 1,
         synthesizer_index: int = 0,
         deep_mode: bool = False,
         on_intervention: InterventionCb | None = None,
@@ -169,7 +170,7 @@ class Orchestrator:
         registry = self._registry()
         try:
             return self._correr(
-                session, topic, registry, max_rounds, synthesizer_index,
+                session, topic, registry, max_rounds, min_rounds, synthesizer_index,
                 deep_mode, on_intervention, old_session
             )
         except AgentError as exc:
@@ -184,6 +185,7 @@ class Orchestrator:
         topic: DebateTopic,
         registry: ToolRegistry,
         max_rounds: int,
+        min_rounds: int,
         synthesizer_index: int,
         deep_mode: bool,
         on_intervention: InterventionCb | None,
@@ -255,7 +257,10 @@ class Orchestrator:
                 self._on_event("replica_fin", agent.name, clean)
 
             positions = new_positions
-            if all(v == "si" for v in verdicts.values()):
+            # El corte por convergencia se ignora hasta cumplir min_rounds: en un
+            # auto-debate (min_rounds=2) evita que un eco declare acuerdo en la
+            # primera réplica, sin haber surgido desacuerdo real que escrutar.
+            if r >= min_rounds and all(v == "si" for v in verdicts.values()):
                 session.converged = True
                 session.converged_round = r
                 self._on_event("convergencia", f"ronda {r}", None)

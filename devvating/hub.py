@@ -96,9 +96,10 @@ def _debate_worker(
             emitir({"tipo": "intervencion_resuelta", "ronda": ronda, "texto": nota})
             return nota
 
+    autodebate = banco.es_autodebate(agente_a, agente_b)
     sesgos = [s for s in (config.get("sesgos") or []) if isinstance(s, str)]
     try:
-        biases, _ = roles.resolver_biases(sesgos, banco.es_autodebate(agente_a, agente_b))
+        biases, _ = roles.resolver_biases(sesgos, autodebate)
     except ValueError as exc:
         emitir({"tipo": "error", "mensaje": str(exc)})
         emitir({"tipo": "cerrado"})
@@ -109,11 +110,13 @@ def _debate_worker(
     )
     topic = DebateTopic(prompt=config["tema"], context_hint=config.get("files", ""))
     estado_rotacion = rotation.load(repo)
+    rounds = int(config.get("rounds", 2))
 
     try:
         session = orch.run(
             topic,
-            max_rounds=int(config.get("rounds", 2)),
+            max_rounds=rounds,
+            min_rounds=min(2, rounds) if autodebate else 1,
             synthesizer_index=estado_rotacion.synthesizer_index(),
             deep_mode=bool(config.get("profundo", False)),
             on_intervention=on_intervention,
