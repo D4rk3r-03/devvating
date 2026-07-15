@@ -68,6 +68,36 @@
 .lista-transcripts a:hover { color: var(--text-main); }
 .lista-transcripts .vacio { color: var(--text-muted); font-style: italic; }
 
+/* --- Historial de ramas de ejecución ---------------------------------- */
+.lista-ramas {
+  list-style: none; font-size: .78rem;
+  flex-shrink: 0; max-height: 26vh; overflow-y: auto;
+}
+.lista-ramas li {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .3rem 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+}
+.lista-ramas li.actual { opacity: .7; }
+.rama-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.rama-nombre {
+  color: var(--text-main); font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rama-asunto {
+  color: var(--text-muted); font-size: .72rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rama-actual {
+  color: var(--info); font-size: .68rem; text-transform: uppercase;
+  letter-spacing: .06em; flex-shrink: 0;
+}
+.rama-borrar {
+  display: inline-flex; padding: .3rem; border: none; cursor: pointer;
+  background: transparent; color: var(--text-muted); border-radius: 6px; flex-shrink: 0;
+}
+.rama-borrar:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.lista-ramas .vacio { color: var(--text-muted); font-style: italic; }
+
 /* ---------------------------------------------------------------- main */
 .barra-estado {
   display: flex; align-items: center; gap: .6rem;

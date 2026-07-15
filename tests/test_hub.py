@@ -261,6 +261,50 @@ class TestReanudar:
         assert "A0 previo" in textos and data["synthesis"] == "síntesis reanudada"
 
 
+class TestRamas:
+    @staticmethod
+    def _rama_con_commit(repo, nombre, archivo):
+        from devvating import gitutil
+        gitutil.create_branch(str(repo), nombre)
+        (repo / archivo).write_text("x\n", encoding="utf-8")
+        gitutil.stage_all(str(repo))
+        gitutil.commit(str(repo), f"feat: {nombre}")
+        gitutil.checkout(str(repo), "main")
+
+    def test_lista_ramas_de_ejecucion_y_marca_la_actual(self, git_repo):
+        self._rama_con_commit(git_repo, "devvating/uno", "a.py")
+        app = crear_app(repo=str(git_repo))
+        with TestClient(app) as c:
+            data = c.get("/api/ramas").json()
+        assert data["actual"] == "main"
+        nombres = [r["nombre"] for r in data["ramas"]]
+        assert "devvating/uno" in nombres
+        assert all(r["actual"] is False for r in data["ramas"])  # ninguna es main
+
+    def test_borrar_rama_de_ejecucion(self, git_repo):
+        self._rama_con_commit(git_repo, "devvating/uno", "a.py")
+        app = crear_app(repo=str(git_repo))
+        with TestClient(app) as c:
+            assert c.post("/api/ramas/borrar", json={"rama": "devvating/uno"}).status_code == 200
+            nombres = [r["nombre"] for r in c.get("/api/ramas").json()["ramas"]]
+            assert "devvating/uno" not in nombres
+
+    def test_no_borra_ramas_ajenas(self, git_repo):
+        app = crear_app(repo=str(git_repo))
+        with TestClient(app) as c:
+            assert c.post("/api/ramas/borrar", json={"rama": "main"}).status_code == 422
+            assert c.post("/api/ramas/borrar",
+                          json={"rama": "feature/x"}).status_code == 422
+
+    def test_no_borra_la_rama_actual(self, git_repo):
+        from devvating import gitutil
+        gitutil.create_branch(str(git_repo), "devvating/actual")  # quedamos en ella
+        app = crear_app(repo=str(git_repo))
+        with TestClient(app) as c:
+            assert c.post("/api/ramas/borrar",
+                          json={"rama": "devvating/actual"}).status_code == 409
+
+
 class _BackendEscritor:
     """Simula el agente headless de la fase 4 escribiendo en el repo."""
 

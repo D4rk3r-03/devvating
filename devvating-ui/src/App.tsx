@@ -31,6 +31,8 @@ type Item =
   | { clase: "turno"; agente: string; fase: string; texto: string }
   | { clase: "aviso"; texto: string };
 
+type Rama = { nombre: string; sha: string; fecha: string; asunto: string; actual: boolean };
+
 // ------------------------------------------------------------- helpers
 const escapeHtml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -77,6 +79,7 @@ export default function App() {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [corriendo, setCorriendo] = useState(false);
   const [transcripts, setTranscripts] = useState<string[]>([]);
+  const [ramas, setRamas] = useState<Rama[]>([]);
   const [aviso, setAviso] = useState("");
 
   const [tema, setTema] = useState("");
@@ -105,11 +108,27 @@ export default function App() {
     fetch("/api/transcripts").then((r) => r.json())
       .then((d) => setTranscripts(d.transcripts));
 
+  const cargarRamas = () =>
+    fetch("/api/ramas").then((r) => r.json()).then((d) => setRamas(d.ramas ?? []));
+
+  const borrarRama = async (nombre: string) => {
+    if (!window.confirm(`¿Borrar la rama ${nombre}? Se pierde lo que no hayas fusionado.`))
+      return;
+    const r = await fetch("/api/ramas/borrar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rama: nombre }),
+    });
+    if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo borrar la rama.");
+    cargarRamas();
+  };
+
   useEffect(() => {
     fetch("/api/roster").then((r) => r.json()).then((d) => {
       setRoster(d.agentes); setAlias(d.alias); setSesgosDisp(d.sesgos ?? []);
     });
     cargarTranscripts();
+    cargarRamas();
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.onmessage = (ev) => {
@@ -190,6 +209,10 @@ export default function App() {
     if (ejecucion?.estado === "fin" && !commitMsg && config?.tema)
       setCommitMsg(config.tema);
   }, [ejecucion, config, commitMsg]);
+
+  // El historial de ramas cambia al ejecutar (aparece una) o al commitear/
+  // descartar (cambia su estado o se borra): refrescarlo entonces.
+  useEffect(() => { cargarRamas(); }, [cierre, ejecucion?.estado]);
 
   useEffect(() => {
     finRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -339,6 +362,31 @@ export default function App() {
             </li>
           ))}
           {transcripts.length === 0 && <li className="vacio">aún ninguno</li>}
+        </ul>
+
+        <h2 className="titulo-lista"><GitBranch size={14} /> Ramas de ejecución</h2>
+        <ul className="lista-ramas">
+          {ramas.map((r) => (
+            <li key={r.nombre} className={r.actual ? "actual" : ""}>
+              <div className="rama-info">
+                <span className="rama-nombre" title={r.nombre}>
+                  {r.nombre.replace(/^devvating\//, "")}
+                </span>
+                <span className="rama-asunto" title={r.asunto}>
+                  {r.asunto || "(sin commit)"}
+                </span>
+              </div>
+              {r.actual ? (
+                <span className="rama-actual" title="rama actual">aquí</span>
+              ) : (
+                <button className="rama-borrar" title="Borrar rama"
+                  onClick={() => borrarRama(r.nombre)}>
+                  <Trash2 size={13} />
+                </button>
+              )}
+            </li>
+          ))}
+          {ramas.length === 0 && <li className="vacio">ninguna</li>}
         </ul>
       </aside>
 

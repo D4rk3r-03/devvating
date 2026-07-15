@@ -74,6 +74,33 @@ def delete_branch(repo: str, branch: str) -> None:
         raise RuntimeError(f"No se pudo borrar la rama '{branch}': {r.stderr.strip()}")
 
 
+def list_branches(repo: str, prefix: str = "devvating/") -> list[dict]:
+    """Ramas bajo <prefix>, más recientes primero, con sha/fecha/asunto.
+
+    Historial de ejecuciones para el Hub: cada debate ejecutado deja una rama
+    devvating/<slug>-<fecha> que se acumula hasta que el vocero la fusione o
+    descarte. Esto las lista para revisarlas y limpiarlas.
+    """
+    fmt = "%(refname:short)%09%(objectname:short)%09%(committerdate:iso8601)%09%(contents:subject)"
+    out = _run(
+        ["for-each-ref", "--sort=-committerdate", f"--format={fmt}",
+         f"refs/heads/{prefix}"],
+        repo,
+    ).stdout
+    ramas = []
+    for line in out.splitlines():
+        partes = line.split("\t")
+        if len(partes) < 3:
+            continue
+        ramas.append({
+            "nombre": partes[0],
+            "sha": partes[1],
+            "fecha": partes[2],
+            "asunto": partes[3] if len(partes) > 3 else "",
+        })
+    return ramas
+
+
 def discard_branch(repo: str, base_branch: str, branch: str) -> None:
     """Descarta la rama de ejecución y vuelve a la base.
 

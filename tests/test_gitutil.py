@@ -27,6 +27,26 @@ class TestCommit:
             gitutil.commit(str(git_repo), "   ")
 
 
+class TestListado:
+    def test_lista_solo_ramas_devvating_con_asunto(self, git_repo):
+        # Una rama devvating con commit, y una rama ajena que NO debe aparecer.
+        gitutil.create_branch(str(git_repo), "devvating/uno")
+        (git_repo / "a.py").write_text("x\n", encoding="utf-8")
+        gitutil.stage_all(str(git_repo))
+        gitutil.commit(str(git_repo), "feat: rama uno")
+        gitutil.checkout(str(git_repo), "main")
+        gitutil.create_branch(str(git_repo), "feature/ajena")
+        gitutil.checkout(str(git_repo), "main")
+
+        ramas = gitutil.list_branches(str(git_repo))
+
+        nombres = [r["nombre"] for r in ramas]
+        assert "devvating/uno" in nombres
+        assert "feature/ajena" not in nombres  # fuera del prefijo
+        uno = next(r for r in ramas if r["nombre"] == "devvating/uno")
+        assert uno["asunto"] == "feat: rama uno" and uno["sha"]
+
+
 class TestDescarte:
     def test_descartar_vuelve_a_la_base_y_borra_la_rama(self, git_repo):
         gitutil.create_branch(str(git_repo), "devvating/x")

@@ -401,6 +401,35 @@ def crear_app(
         _emitir({"tipo": "descartar_fin", "base": ue["base"], "rama": ue["rama"]})
         return {"ok": True}
 
+    @app.get("/api/ramas")
+    def ramas() -> dict:
+        """Historial de ramas de ejecución (devvating/) del repo del Hub."""
+        if not gitutil.is_git_repo(repo):
+            return {"ramas": [], "actual": None}
+        actual = gitutil.current_branch(repo)
+        lista = gitutil.list_branches(repo)
+        for r in lista:
+            r["actual"] = r["nombre"] == actual
+        return {"ramas": lista, "actual": actual}
+
+    @app.post("/api/ramas/borrar")
+    def borrar_rama(cuerpo: dict) -> dict:
+        """Borra una rama de ejecución. Solo devvating/, nunca la rama actual."""
+        nombre = str(cuerpo.get("rama") or "")
+        if not nombre.startswith("devvating/"):
+            raise HTTPException(422, "Solo se pueden borrar ramas de ejecución (devvating/).")
+        if not gitutil.is_git_repo(repo):
+            raise HTTPException(422, f"'{repo}' no es un repositorio git.")
+        if nombre == gitutil.current_branch(repo):
+            raise HTTPException(
+                409, "No puedes borrar la rama en la que estás. Cambia de rama primero."
+            )
+        try:
+            gitutil.delete_branch(repo, nombre)
+        except RuntimeError as exc:
+            raise HTTPException(422, str(exc))
+        return {"ok": True}
+
     def _dir_transcripts() -> Path:
         return Path(repo) / "transcripts"
 
