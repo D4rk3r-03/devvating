@@ -53,13 +53,24 @@ class ClaudeAdapter:
         self.last_usage = None
         total = TurnUsage()
 
+        # Prefijo estable = tools + system (orden de render tools → system →
+        # messages). Un breakpoint de caché en el último bloque system cachea
+        # AMBOS juntos: se reescribe una vez y se relee a ~0.1x en cada
+        # iteración del bucle de herramientas y en cada turno con el mismo rol.
+        # Ojo (cautela del debate): si el prefijo no supera el mínimo cacheable
+        # del modelo (~4096 tokens en Opus 4.8) no cachea en silencio; se
+        # verifica con cache_read_tokens en TurnUsage, ya instrumentado.
+        system_cacheado = [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ]
+
         for _ in range(self._max_iterations):
             try:
                 response = self._client.messages.create(
                     model=self._model,
                     max_tokens=8000,
                     thinking={"type": "adaptive"},
-                    system=system,
+                    system=system_cacheado,
                     tools=tools,
                     messages=messages,
                 )
