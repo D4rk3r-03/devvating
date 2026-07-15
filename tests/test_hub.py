@@ -36,6 +36,29 @@ class TestWorker:
         # Los eventos del orquestador viajan JSON-planos.
         assert any(e["tipo"] == "evento" and e["evento"] == "sintesis_fin" for e in eventos)
 
+    def test_autodebate_aplica_sesgos_y_piso_de_rondas(self, tmp_path):
+        # Par desambiguado (claude#1/#2): sin sesgos explícitos, el worker aplica
+        # el par por defecto y exige 2 rondas antes de honrar la convergencia.
+        def fabrica(nombres, cfg, repo):
+            a = StubAdapter("claude#1",
+                            ["A0", "A1 [CONVERGENCIA: SÍ]", "A2 [CONVERGENCIA: SÍ]", "s"])
+            b = StubAdapter("claude#2", ["B0", "B1 [CONVERGENCIA: SÍ]", "B2 [CONVERGENCIA: SÍ]"])
+            fabrica.a = a
+            return a, b
+
+        eventos: list[dict] = []
+        _debate_worker(
+            {"tema": "t", "agentes": ["claude-cli", "claude-cli"], "rounds": 2,
+             "repo": str(tmp_path)},
+            eventos.append, fabrica,
+        )
+        from devvating import roles
+        # El sesgo audaz por defecto viaja en el system prompt de la propuesta.
+        assert roles.SESGOS["audaz"] in fabrica.a.llamadas[0][0]
+        # El piso de 2 rondas impidió el corte en la ronda 1 (eco).
+        fin = next(e for e in eventos if e["tipo"] == "fin")
+        assert fin["convergio"] and fin["ronda_convergencia"] == 2
+
     def test_par_invalido_emite_error_y_cierra(self, tmp_path):
         eventos: list[dict] = []
         _debate_worker(
@@ -59,6 +82,7 @@ class TestApi:
         c, _ = cliente
         r = c.get("/api/roster").json()
         assert "kimi" in r["agentes"] and r["alias"]["agy"] == "antigravity"
+        assert "audaz" in r["sesgos"] and "neutral" in r["sesgos"]
         assert c.get("/api/estado").json()["corriendo"] is False
 
     def test_lanzar_debate_completo_via_http(self, cliente):

@@ -254,7 +254,11 @@ def crear_app(
     # ------------------------------------------------------------------ API
     @app.get("/api/roster")
     def roster() -> dict:
-        return {"agentes": banco.nombres(), "alias": dict(banco.ALIAS)}
+        return {
+            "agentes": banco.nombres(),
+            "alias": dict(banco.ALIAS),
+            "sesgos": list(roles.SESGOS),
+        }
 
     @app.get("/api/estado")
     def estado() -> dict:
@@ -283,6 +287,7 @@ def crear_app(
             "rounds": config.get("rounds", 2),
             "profundo": bool(config.get("profundo", False)),
             "interactivo": bool(config.get("interactivo", False)),
+            "sesgos": [s for s in (config.get("sesgos") or []) if isinstance(s, str)],
         }})
         threading.Thread(
             target=_debate_worker,

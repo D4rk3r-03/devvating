@@ -12,7 +12,7 @@ type Usage = {
   cost_usd: number | null;
 };
 type Msg =
-  | { tipo: "inicio"; config: { tema: string; agentes: string[]; rounds: number; profundo: boolean; interactivo?: boolean } }
+  | { tipo: "inicio"; config: { tema: string; agentes: string[]; rounds: number; profundo: boolean; interactivo?: boolean; sesgos?: string[] } }
   | { tipo: "evento"; evento: string; agente: string; texto: string | null }
   | { tipo: "fin"; sintesis: string; sintetizador: string; convergio: boolean; ronda_convergencia: number | null; usage: Record<string, Usage>; transcript: string }
   | { tipo: "error"; mensaje: string; resets_at?: string | null; parcial?: string | null }
@@ -70,6 +70,7 @@ function Pendiente({ agente, fase }: { agente: string; fase: string }) {
 export default function App() {
   const [roster, setRoster] = useState<string[]>([]);
   const [alias, setAlias] = useState<Record<string, string>>({});
+  const [sesgosDisp, setSesgosDisp] = useState<string[]>([]);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [corriendo, setCorriendo] = useState(false);
   const [transcripts, setTranscripts] = useState<string[]>([]);
@@ -82,10 +83,19 @@ export default function App() {
   const [interactivo, setInteractivo] = useState(false);
   const [parA, setParA] = useState("claude-cli");
   const [parB, setParB] = useState("gemini-api");
+  const [sesgoA, setSesgoA] = useState("audaz");
+  const [sesgoB, setSesgoB] = useState("cauto");
   const [nota, setNota] = useState("");
   const [ejecutando, setEjecutando] = useState(false);
 
   const finRef = useRef<HTMLDivElement>(null);
+
+  // Auto-debate: el mismo agente dos veces (mismo nombre base). Solo entonces
+  // tiene sentido asignar sesgos opuestos para romper el eco.
+  const esAutodebate = useMemo(
+    () => nombreAgente(parA, alias) === nombreAgente(parB, alias),
+    [parA, parB, alias],
+  );
 
   const cargarTranscripts = () =>
     fetch("/api/transcripts").then((r) => r.json())
@@ -93,7 +103,7 @@ export default function App() {
 
   useEffect(() => {
     fetch("/api/roster").then((r) => r.json()).then((d) => {
-      setRoster(d.agentes); setAlias(d.alias);
+      setRoster(d.agentes); setAlias(d.alias); setSesgosDisp(d.sesgos ?? []);
     });
     cargarTranscripts();
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -180,7 +190,10 @@ export default function App() {
     const r = await fetch("/api/debates", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tema, files, rounds, profundo, interactivo, agentes: [parA, parB] }),
+      body: JSON.stringify({
+        tema, files, rounds, profundo, interactivo, agentes: [parA, parB],
+        sesgos: esAutodebate ? [sesgoA, sesgoB] : [],
+      }),
     });
     if (r.ok) setCorriendo(true);
     else setAviso((await r.json()).detail ?? "No se pudo lanzar el debate.");
@@ -234,6 +247,26 @@ export default function App() {
             </select>
           </label>
         </div>
+        {esAutodebate && (
+          <>
+            <p className="pista-sesgos">
+              <Scale size={13} /> Mismo agente dos veces: asígnales inclinaciones
+              opuestas para que debatan de verdad y no hagan eco.
+            </p>
+            <div className="fila">
+              <label>Sesgo A
+                <select value={sesgoA} onChange={(e) => setSesgoA(e.target.value)} disabled={corriendo}>
+                  {sesgosDisp.map((s) => <option key={s}>{s}</option>)}
+                </select>
+              </label>
+              <label>Sesgo B
+                <select value={sesgoB} onChange={(e) => setSesgoB(e.target.value)} disabled={corriendo}>
+                  {sesgosDisp.map((s) => <option key={s}>{s}</option>)}
+                </select>
+              </label>
+            </div>
+          </>
+        )}
         <div className="fila">
           <label>Rondas
             <input type="number" min={1} max={5} value={rounds}
@@ -274,6 +307,7 @@ export default function App() {
           {config && <span className="tema-actual" title={config.tema}>
             {nombreAgente(config.agentes[0], alias)} <Swords size={13} /> {nombreAgente(config.agentes[1], alias)}
             {" · "}≤{config.rounds} rondas{config.profundo ? " · profundo" : ""}
+            {config.sesgos && config.sesgos.length === 2 ? ` · ${config.sesgos.join("/")}` : ""}
           </span>}
         </header>
 
