@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import {
-  FileText, GitBranch, Hand, Play, RefreshCw, Scale, Send, Swords, TriangleAlert,
+  Check, FileText, GitBranch, Hand, Play, RefreshCw, RotateCcw, Scale, Send,
+  Swords, Trash2, TriangleAlert,
 } from "lucide-react";
 import "./App.css";
 
@@ -20,8 +21,10 @@ type Msg =
   | { tipo: "intervencion_resuelta"; ronda: number; texto: string | null }
   | { tipo: "ejecucion_inicio"; transcript: string; repo: string }
   | { tipo: "ejecucion_evento"; evento: string; valor: string }
-  | { tipo: "ejecucion_fin"; rama: string; returncode: number; archivos: string[]; diff: string }
-  | { tipo: "ejecucion_error"; mensaje: string };
+  | { tipo: "ejecucion_fin"; rama: string; rama_base: string; returncode: number; archivos: string[]; diff: string }
+  | { tipo: "ejecucion_error"; mensaje: string }
+  | { tipo: "commit_fin"; sha: string; rama: string }
+  | { tipo: "descartar_fin"; base: string; rama: string };
 
 type Item =
   | { clase: "separador"; texto: string }
@@ -87,6 +90,7 @@ export default function App() {
   const [sesgoB, setSesgoB] = useState("cauto");
   const [nota, setNota] = useState("");
   const [ejecutando, setEjecutando] = useState(false);
+  const [commitMsg, setCommitMsg] = useState("");
 
   const finRef = useRef<HTMLDivElement>(null);
 
@@ -124,7 +128,7 @@ export default function App() {
   }, []);
 
   // Reducción de mensajes → items del feed + turno pendiente + paneles.
-  const { items, pendiente, config, fin, error, intervencion, ejecucion } = useMemo(() => {
+  const { items, pendiente, config, fin, error, intervencion, ejecucion, cierre } = useMemo(() => {
     const items: Item[] = [];
     let pendiente: { agente: string; fase: string } | null = null;
     let config: Extract<Msg, { tipo: "inicio" }>["config"] | null = null;
@@ -133,8 +137,12 @@ export default function App() {
     let intervencion: { ronda: number } | null = null;
     let ejecucion:
       | { estado: "corriendo"; detalle: string }
-      | { estado: "fin"; rama: string; archivos: string[]; diff: string; returncode: number }
+      | { estado: "fin"; rama: string; rama_base: string; archivos: string[]; diff: string; returncode: number }
       | { estado: "error"; mensaje: string }
+      | null = null;
+    let cierre:
+      | { tipo: "commit"; sha: string; rama: string }
+      | { tipo: "descartar"; base: string }
       | null = null;
     for (const m of msgs) {
       if (m.tipo === "inicio") config = m.config;
@@ -153,9 +161,11 @@ export default function App() {
       else if (m.tipo === "ejecucion_evento")
         ejecucion = { estado: "corriendo", detalle: `${m.evento}: ${m.valor}` };
       else if (m.tipo === "ejecucion_fin")
-        ejecucion = { estado: "fin", rama: m.rama, archivos: m.archivos, diff: m.diff, returncode: m.returncode };
+        ejecucion = { estado: "fin", rama: m.rama, rama_base: m.rama_base, archivos: m.archivos, diff: m.diff, returncode: m.returncode };
       else if (m.tipo === "ejecucion_error")
         ejecucion = { estado: "error", mensaje: m.mensaje };
+      else if (m.tipo === "commit_fin") cierre = { tipo: "commit", sha: m.sha, rama: m.rama };
+      else if (m.tipo === "descartar_fin") cierre = { tipo: "descartar", base: m.base };
       else if (m.tipo === "evento") {
         const { evento, agente, texto } = m;
         if (evento === "ronda") items.push({ clase: "separador", texto: agente });
@@ -171,12 +181,15 @@ export default function App() {
         }
       }
     }
-    return { items, pendiente, config, fin, error, intervencion, ejecucion };
+    return { items, pendiente, config, fin, error, intervencion, ejecucion, cierre };
   }, [msgs]);
 
   useEffect(() => {
     if (ejecucion && ejecucion.estado !== "corriendo") setEjecutando(false);
-  }, [ejecucion]);
+    // Sugerencia editable de mensaje de commit: el tema del debate.
+    if (ejecucion?.estado === "fin" && !commitMsg && config?.tema)
+      setCommitMsg(config.tema);
+  }, [ejecucion, config, commitMsg]);
 
   useEffect(() => {
     finRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -219,6 +232,35 @@ export default function App() {
       setEjecutando(false);
       setAviso((await r.json()).detail ?? "No se pudo lanzar la ejecución.");
     }
+  };
+
+  const commitear = async () => {
+    const r = await fetch("/api/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mensaje: commitMsg }),
+    });
+    if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo commitear.");
+    else setCommitMsg("");
+  };
+
+  const descartar = async () => {
+    const r = await fetch("/api/descartar", { method: "POST" });
+    if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo descartar.");
+  };
+
+  const reanudar = async (parcial: string) => {
+    setAviso("");
+    const r = await fetch("/api/debates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentes: [parA, parB], rounds, resume: parcial,
+        sesgos: esAutodebate ? [sesgoA, sesgoB] : [],
+      }),
+    });
+    if (r.ok) setCorriendo(true);
+    else setAviso((await r.json()).detail ?? "No se pudo reanudar el debate.");
   };
 
   return (
@@ -360,8 +402,15 @@ export default function App() {
               <h3><TriangleAlert size={16} /> Debate interrumpido</h3>
               <p>{error.mensaje}</p>
               {error.resets_at && <p>La cuota se reinicia a las <b>{error.resets_at}</b>.</p>}
-              {error.parcial && <p>Turnos pagados a salvo en <code>{error.parcial}</code> —
-                reanudable con <code>devvating debate --resume</code>.</p>}
+              {error.parcial && (
+                <>
+                  <p>Turnos pagados a salvo en <code>{error.parcial}</code>. Nada se perdió.</p>
+                  <button className="reanudar" onClick={() => reanudar(error.parcial!)}
+                    disabled={corriendo}>
+                    <RotateCcw size={15} /> Reanudar debate
+                  </button>
+                </>
+              )}
             </div>
           )}
 
@@ -421,9 +470,39 @@ export default function App() {
                       ))}</pre>
                     </>
                   )}
-                  <p className="pista-cierre">Nada se ha commiteado. Para conservar:{" "}
-                    <code>git commit</code> · para descartar:{" "}
-                    <code>git branch -D {ejecucion.rama}</code> (tras volver a tu rama).</p>
+                  {cierre ? (
+                    <p className="cierre-hecho">
+                      <Check size={15} />{" "}
+                      {cierre.tipo === "commit"
+                        ? <>Commiteado en <code>{cierre.rama}</code> (<code>{cierre.sha}</code>).
+                            Fusiónalo a tu rama cuando lo revises.</>
+                        : <>Descartado: volviste a <code>{cierre.base}</code> y la rama de
+                            ejecución se borró. El repo quedó como estaba.</>}
+                    </p>
+                  ) : ejecucion.archivos.length > 0 ? (
+                    <div className="acciones-cierre">
+                      <label>Mensaje de commit (editable)
+                        <textarea value={commitMsg} rows={2}
+                          onChange={(e) => setCommitMsg(e.target.value)} />
+                      </label>
+                      <div className="fila-cierre">
+                        <button className="commit" onClick={commitear}
+                          disabled={!commitMsg.trim()}>
+                          <GitBranch size={14} /> Commit en la rama
+                        </button>
+                        <button className="descartar" onClick={descartar}>
+                          <Trash2 size={14} /> Descartar
+                        </button>
+                      </div>
+                      <p className="pista-cierre">El commit queda en <code>{ejecucion.rama}</code>,
+                        no toca tu rama de trabajo. Descartar vuelve a{" "}
+                        <code>{ejecucion.rama_base}</code> y borra la rama.</p>
+                    </div>
+                  ) : (
+                    <button className="descartar" onClick={descartar}>
+                      <Trash2 size={14} /> Descartar rama vacía
+                    </button>
+                  )}
                 </>
               )}
             </div>

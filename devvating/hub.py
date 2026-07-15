@@ -36,9 +36,9 @@ except ImportError as exc:  # pragma: no cover - guard de instalación
     ) from exc
 
 from . import agentes as banco
-from . import reporte, roles, rotation
+from . import gitutil, reporte, roles, rotation
 from .config import Config
-from .debate import _save_transcript
+from .debate import _load_partial_session, _save_transcript
 from .executor import ClaudeCodeBackend, ExecutionPlan, Executor, ExecutorError
 from .orchestrator import DebateAbortedError, DebateTopic, Orchestrator
 
@@ -68,12 +68,16 @@ def _debate_worker(
     emitir: Callable[[dict], None],
     fabrica_par: Callable,
     esperar_nota: Callable[[int], str | None] | None = None,
+    old_session=None,
 ) -> None:
     """Corre un debate completo en un hilo, emitiendo eventos JSON-planos.
 
     `esperar_nota(ronda)` es el puente de la intervención del vocero (D4,
     Fase 2 del plan del Hub): bloquea el hilo del debate hasta que el
     navegador responda o venza el timeout.
+
+    `old_session` (reanudar): sesión parcial de un debate cortado; el
+    orquestador reusa los turnos ya pagados y solo corre lo que falta.
     """
     repo = config.get("repo", ".")
     cfg = Config.from_env()
@@ -120,6 +124,7 @@ def _debate_worker(
             synthesizer_index=estado_rotacion.synthesizer_index(),
             deep_mode=bool(config.get("profundo", False)),
             on_intervention=on_intervention,
+            old_session=old_session,
         )
     except DebateAbortedError as exc:
         parcial = None
@@ -186,6 +191,8 @@ def _ejecucion_worker(
     emitir({
         "tipo": "ejecucion_fin",
         "rama": resultado.branch,
+        "rama_base": resultado.base_branch,
+        "repo": config["repo"],
         "returncode": resultado.returncode,
         "archivos": resultado.changed_files,
         "diff": resultado.diff,
@@ -208,6 +215,9 @@ def crear_app(
     # nota del vocero que llega por POST /api/intervencion.
     app.state.notas = queue.Queue()
     app.state.intervencion_abierta = False
+    # Última ejecución con cambios en staging, a la espera de que el vocero
+    # decida: commit en la rama o descartar. None = nada pendiente.
+    app.state.ultima_ejecucion = None
 
     @app.on_event("startup")
     async def _arrancar() -> None:
@@ -224,6 +234,12 @@ def crear_app(
             if msg.get("tipo") == "ejecucion_cerrada":
                 app.state.ejecutando = False
                 continue
+            if msg.get("tipo") == "ejecucion_fin":
+                # Queda pendiente la decisión del vocero (commit/descartar).
+                app.state.ultima_ejecucion = {
+                    "rama": msg["rama"], "base": msg.get("rama_base", ""),
+                    "repo": msg["repo"],
+                }
             app.state.historial.append(msg)
             for ws in set(app.state.clientes):
                 try:
@@ -273,12 +289,27 @@ def crear_app(
     def lanzar(config: dict) -> dict:
         if app.state.corriendo:
             raise HTTPException(409, "Ya hay un debate en curso (v1: uno a la vez).")
-        tema = str(config.get("tema", "")).strip()
         agentes = config.get("agentes") or []
-        if not tema:
-            raise HTTPException(422, "Falta el tema del debate.")
         if len(agentes) != 2:
             raise HTTPException(422, "Elige exactamente 2 agentes del roster.")
+
+        # Reanudar (resume): el tema, las pistas y el modo profundo vienen del
+        # transcript parcial; los agentes se re-eligen (los adaptadores no se
+        # serializan). El orquestador reusa los turnos ya pagados.
+        old_session = None
+        resume = str(config.get("resume") or "").strip()
+        if resume:
+            old_session = _load_partial_session(str(_ruta_transcript(resume)))
+            config = {
+                **config,
+                "tema": old_session.topic.prompt,
+                "files": old_session.topic.context_hint or config.get("files", ""),
+                "profundo": old_session.deep_mode,
+            }
+
+        tema = str(config.get("tema", "")).strip()
+        if not tema:
+            raise HTTPException(422, "Falta el tema del debate.")
         config = {**config, "tema": tema, "repo": config.get("repo") or repo}
         app.state.corriendo = True
         app.state.historial = []
@@ -288,10 +319,11 @@ def crear_app(
             "profundo": bool(config.get("profundo", False)),
             "interactivo": bool(config.get("interactivo", False)),
             "sesgos": [s for s in (config.get("sesgos") or []) if isinstance(s, str)],
+            "reanudado": bool(resume),
         }})
         threading.Thread(
             target=_debate_worker,
-            args=(config, _emitir, fabrica_par, _esperar_nota),
+            args=(config, _emitir, fabrica_par, _esperar_nota, old_session),
             daemon=True,
         ).start()
         return {"ok": True}
@@ -331,6 +363,42 @@ def crear_app(
             ),
             daemon=True,
         ).start()
+        return {"ok": True}
+
+    @app.post("/api/commit")
+    def commit_cambios(cuerpo: dict) -> dict:
+        """Confirma en la rama devvating/ los cambios en staging (gatillo del vocero).
+
+        Mantiene la invariante: el commit NUNCA es automático — llega solo por
+        esta acción explícita. Commitea en la propia rama de ejecución; el merge
+        a la rama de trabajo lo hace el vocero cuando revisó.
+        """
+        ue = app.state.ultima_ejecucion
+        if not ue:
+            raise HTTPException(409, "No hay una ejecución lista para commitear.")
+        mensaje = str(cuerpo.get("mensaje") or "").strip()
+        if not mensaje:
+            raise HTTPException(422, "El mensaje de commit no puede estar vacío.")
+        try:
+            sha = gitutil.commit(ue["repo"], mensaje)
+        except RuntimeError as exc:
+            raise HTTPException(422, str(exc))
+        app.state.ultima_ejecucion = None
+        _emitir({"tipo": "commit_fin", "sha": sha, "rama": ue["rama"]})
+        return {"ok": True, "sha": sha}
+
+    @app.post("/api/descartar")
+    def descartar_cambios() -> dict:
+        """Deshace la ejecución: vuelve a la rama base y borra la devvating/."""
+        ue = app.state.ultima_ejecucion
+        if not ue:
+            raise HTTPException(409, "No hay una ejecución que descartar.")
+        try:
+            gitutil.discard_branch(ue["repo"], ue["base"], ue["rama"])
+        except RuntimeError as exc:
+            raise HTTPException(422, str(exc))
+        app.state.ultima_ejecucion = None
+        _emitir({"tipo": "descartar_fin", "base": ue["base"], "rama": ue["rama"]})
         return {"ok": True}
 
     def _dir_transcripts() -> Path:

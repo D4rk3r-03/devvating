@@ -46,3 +46,40 @@ def staged_diff(repo: str) -> str:
 def staged_changed_files(repo: str) -> list[str]:
     out = _run(["diff", "--cached", "--name-only"], repo).stdout
     return [line for line in out.splitlines() if line]
+
+
+def commit(repo: str, message: str) -> str:
+    """Commitea lo que esté en staging; devuelve el sha corto.
+
+    Decisión del vocero (D2, fase 4): el commit NUNCA es automático — lo
+    dispara el humano. Esta función es el músculo; el gatillo vive en la UI/CLI.
+    """
+    if not message.strip():
+        raise RuntimeError("El mensaje de commit no puede estar vacío.")
+    r = _run(["commit", "-m", message], repo)
+    if r.returncode != 0:
+        raise RuntimeError(f"No se pudo commitear: {(r.stderr or r.stdout).strip()}")
+    return _run(["rev-parse", "--short", "HEAD"], repo).stdout.strip()
+
+
+def checkout(repo: str, branch: str) -> None:
+    r = _run(["checkout", branch], repo)
+    if r.returncode != 0:
+        raise RuntimeError(f"No se pudo cambiar a '{branch}': {r.stderr.strip()}")
+
+
+def delete_branch(repo: str, branch: str) -> None:
+    r = _run(["branch", "-D", branch], repo)
+    if r.returncode != 0:
+        raise RuntimeError(f"No se pudo borrar la rama '{branch}': {r.stderr.strip()}")
+
+
+def discard_branch(repo: str, base_branch: str, branch: str) -> None:
+    """Descarta la rama de ejecución y vuelve a la base.
+
+    Tira los cambios (staged y en el árbol), regresa a la rama previa y borra la
+    rama devvating/. El botón de "no me convenció": deja el repo como estaba.
+    """
+    _run(["reset", "--hard"], repo)  # descarta staged + árbol de trabajo
+    checkout(repo, base_branch)
+    delete_branch(repo, branch)

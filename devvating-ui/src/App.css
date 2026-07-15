@@ -230,3 +230,46 @@ pre.diff .mas { color: #3fb950; background: rgba(63, 185, 80, .08); display: inl
 pre.diff .menos { color: #f85149; background: rgba(248, 81, 73, .08); display: inline-block; width: 100%; }
 pre.diff .hunk { color: var(--accent); }
 .pista-cierre { color: var(--text-muted); font-size: .78rem; margin-top: .7rem; }
+
+/* --- Cierre de ejecución: commit / descartar --------------------------- */
+.acciones-cierre { margin-top: .9rem; display: flex; flex-direction: column; gap: .5rem; }
+.acciones-cierre label {
+  display: flex; flex-direction: column; gap: .3rem;
+  font-size: .78rem; color: var(--text-muted);
+}
+.acciones-cierre textarea {
+  resize: vertical; min-height: 2.4rem; padding: .5rem .6rem;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-surface-elevated); color: var(--text-main);
+  font: inherit; font-size: .85rem;
+}
+.acciones-cierre textarea:focus {
+  outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.fila-cierre { display: flex; gap: .5rem; flex-wrap: wrap; }
+.fila-cierre button, .panel-ejecucion .descartar {
+  display: inline-flex; align-items: center; gap: .4rem;
+  padding: .5rem .9rem; border-radius: 8px; border: none;
+  font: inherit; font-size: .85rem; font-weight: 600; cursor: pointer;
+}
+.fila-cierre .commit { background: var(--success); color: white; }
+.fila-cierre .commit:hover:not(:disabled) { filter: brightness(1.12); }
+.fila-cierre .commit:disabled { opacity: .45; cursor: not-allowed; }
+.panel-ejecucion .descartar {
+  background: transparent; color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+}
+.panel-ejecucion .descartar:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.cierre-hecho {
+  display: flex; align-items: center; gap: .45rem; margin-top: .9rem;
+  color: var(--success); font-size: .85rem;
+}
+.cierre-hecho svg { flex-shrink: 0; }
+.panel-error .reanudar {
+  display: inline-flex; align-items: center; gap: .4rem; margin-top: .6rem;
+  padding: .5rem .9rem; border-radius: 8px; border: none; cursor: pointer;
+  font: inherit; font-size: .85rem; font-weight: 600;
+  background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white;
+}
+.panel-error .reanudar:hover:not(:disabled) { filter: brightness(1.15); }
+.panel-error .reanudar:disabled { opacity: .45; cursor: not-allowed; }

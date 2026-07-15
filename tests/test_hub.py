@@ -204,6 +204,63 @@ class TestIntervencion:
         assert not any("NOTA DEL VOCERO" in p for _, p in fabrica.a.llamadas)
 
 
+class TestReanudar:
+    def _guardar_parcial(self, repo):
+        """Escribe un .partial.json con la apertura (round 0) ya pagada."""
+        from dataclasses import asdict
+        from devvating.orchestrator import DebateSession, DebateTopic, Turn
+
+        sesion = DebateSession(
+            topic=DebateTopic(prompt="¿tema reanudado?", context_hint=""),
+            turns=[
+                Turn(0, "propuesta", "claude", "A0 previo"),
+                Turn(0, "propuesta", "gemini", "B0 previo"),
+            ],
+        )
+        carpeta = repo / "transcripts"
+        carpeta.mkdir(exist_ok=True)
+        nombre = "20260101-000000-reanudar.partial.json"
+        (carpeta / nombre).write_text(
+            json.dumps(asdict(sesion), ensure_ascii=False), encoding="utf-8"
+        )
+        return nombre
+
+    def test_reanuda_sin_repetir_turnos_pagados(self, tmp_path):
+        def fabrica(nombres, cfg, repo):
+            # Solo lo que FALTA: la apertura viene del parcial, no se re-corre.
+            a = StubAdapter("claude", ["A1 [CONVERGENCIA: SÍ]", "síntesis reanudada"])
+            b = StubAdapter("gemini", ["B1 [CONVERGENCIA: SÍ]"])
+            fabrica.a = a
+            return a, b
+
+        nombre = self._guardar_parcial(tmp_path)
+        app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
+        with TestClient(app) as c:
+            r = c.post("/api/debates", json={
+                "agentes": ["claude-cli", "gemini-api"], "resume": nombre, "rounds": 1,
+            })
+            assert r.status_code == 202
+            for _ in range(100):
+                if not c.get("/api/estado").json()["corriendo"]:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("el debate reanudado no terminó")
+
+        # La apertura NO se re-pagó: claude solo hizo 2 turnos (réplica +
+        # síntesis), no 3. Su primera llamada ya es la réplica, que usa "A0
+        # previo" (la postura reusada del parcial) como postura actual.
+        assert len(fabrica.a.llamadas) == 2
+        assert "Da tu propuesta inicial" not in fabrica.a.llamadas[0][1]
+        assert "A0 previo" in fabrica.a.llamadas[0][1]
+        # El transcript final reúne la apertura reusada y la síntesis nueva.
+        finales = [t for t in c.get("/api/transcripts").json()["transcripts"]
+                   if not t.endswith(".partial.json")]
+        data = c.get(f"/api/transcripts/{finales[0]}").json()
+        textos = [t["text"] for t in data["turns"]]
+        assert "A0 previo" in textos and data["synthesis"] == "síntesis reanudada"
+
+
 class _BackendEscritor:
     """Simula el agente headless de la fase 4 escribiendo en el repo."""
 
@@ -257,6 +314,61 @@ class TestEjecucion:
                         pytest.fail(msg["mensaje"])
             assert fin and fin["rama"].startswith("devvating/")
             assert fin["archivos"] == ["hola.txt"] and "mundo-hub" in fin["diff"]
+
+    def _ejecutar_hasta_fin(self, c):
+        """Debate + ejecuta con el backend escritor; devuelve el evento fin."""
+        self._debatir(c)
+        nombre = c.get("/api/transcripts").json()["transcripts"][0]
+        with c.websocket_connect("/ws") as ws:
+            ws.receive_json()
+            c.post("/api/ejecutar", json={"transcript": nombre})
+            for _ in range(60):
+                msg = ws.receive_json()
+                if msg["tipo"] == "ejecucion_fin":
+                    return msg
+                if msg["tipo"] == "ejecucion_error":
+                    pytest.fail(msg["mensaje"])
+        pytest.fail("la ejecución no terminó")
+
+    def test_commit_confirma_en_la_rama(self, git_repo):
+        import subprocess
+        self._ignorar_transcripts(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor())
+        with TestClient(app) as c:
+            fin = self._ejecutar_hasta_fin(c)
+            r = c.post("/api/commit", json={"mensaje": "feat: cambios del debate"})
+            assert r.status_code == 200 and r.json()["sha"]
+            # Segundo commit sin nueva ejecución: ya no hay nada pendiente.
+            assert c.post("/api/commit", json={"mensaje": "otro"}).status_code == 409
+        log = subprocess.run(["git", "log", "--oneline", fin["rama"]],
+                             cwd=git_repo, capture_output=True, text=True).stdout
+        assert "feat: cambios del debate" in log
+
+    def test_commit_sin_mensaje_es_422(self, git_repo):
+        self._ignorar_transcripts(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor())
+        with TestClient(app) as c:
+            self._ejecutar_hasta_fin(c)
+            assert c.post("/api/commit", json={"mensaje": "  "}).status_code == 422
+
+    def test_descartar_vuelve_a_la_base(self, git_repo):
+        from devvating import gitutil
+        self._ignorar_transcripts(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor())
+        with TestClient(app) as c:
+            self._ejecutar_hasta_fin(c)
+            assert c.post("/api/descartar").status_code == 200
+            assert c.post("/api/descartar").status_code == 409  # ya no hay nada
+        assert gitutil.current_branch(str(git_repo)) == "main"
+        assert gitutil.is_clean(str(git_repo))
+
+    def test_commit_sin_ejecucion_es_409(self, git_repo):
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            assert c.post("/api/commit", json={"mensaje": "x"}).status_code == 409
 
     def test_repo_sucio_reporta_error_amable(self, git_repo):
         self._ignorar_transcripts(git_repo)

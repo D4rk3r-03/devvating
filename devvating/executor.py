@@ -40,6 +40,8 @@ class ExecutionOutcome:
     diff: str
     changed_files: list[str] = field(default_factory=list)
     allow_commands: bool = False
+    # Rama previa a crear la de ejecución: a dónde volver si el vocero descarta.
+    base_branch: str = ""
 
 
 EventCb = Callable[[str, str], None]
@@ -137,6 +139,7 @@ class Executor:
                 "stash antes de ejecutar (así el diff refleja solo los cambios del plan)."
             )
 
+        base_branch = gitutil.current_branch(self.repo)
         branch = branch or self._default_branch(plan.title)
         self._on_event("rama", branch)
         gitutil.create_branch(self.repo, branch)
@@ -157,4 +160,5 @@ class Executor:
             diff=diff,
             changed_files=changed,
             allow_commands=allow_commands,
+            base_branch=base_branch,
         )
