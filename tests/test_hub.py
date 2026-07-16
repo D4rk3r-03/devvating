@@ -426,6 +426,29 @@ class TestEjecucion:
         with TestClient(app) as c:
             assert c.post("/api/commit", json={"mensaje": "x"}).status_code == 409
 
+    def test_ejecutar_ignora_el_repo_del_cuerpo(self, git_repo, tmp_path):
+        # Auto-auditoría (paso 3): el Hub sirve un solo repo; un `repo` arbitrario
+        # en el cuerpo se ignora (no se aplica el plan en cualquier ruta del disco).
+        self._ignorar_transcripts(git_repo)
+        ajeno = tmp_path / "ajeno"
+        ajeno.mkdir()  # ni siquiera es repo git
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor())
+        with TestClient(app) as c:
+            self._debatir(c)
+            nombre = c.get("/api/transcripts").json()["transcripts"][0]
+            with c.websocket_connect("/ws") as ws:
+                ws.receive_json()
+                c.post("/api/ejecutar", json={"transcript": nombre, "repo": str(ajeno)})
+                for _ in range(60):
+                    msg = ws.receive_json()
+                    if msg["tipo"] == "ejecucion_fin":
+                        assert msg["repo"] == str(git_repo)  # usó el servido
+                        break
+                    if msg["tipo"] == "ejecucion_error":
+                        pytest.fail(msg["mensaje"])
+        assert not (ajeno / "hola.txt").exists()  # no se tocó la ruta ajena
+
     def test_ejecucion_fallida_bloquea_commit_pero_permite_descartar(self, git_repo):
         # Hallazgo de la auto-auditoría: un returncode != 0 no debe presentarse
         # como éxito commiteable. El diff se muestra (para revisar), pero el

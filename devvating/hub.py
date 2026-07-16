@@ -313,7 +313,9 @@ def crear_app(
         tema = str(config.get("tema", "")).strip()
         if not tema:
             raise HTTPException(422, "Falta el tema del debate.")
-        config = {**config, "tema": tema, "repo": config.get("repo") or repo}
+        # El Hub sirve UN solo repo (el del arranque); no se acepta override
+        # del cuerpo — sería aplicar/leer en rutas arbitrarias del disco.
+        config = {**config, "tema": tema, "repo": repo}
         app.state.corriendo = True
         app.state.historial = []
         _emitir({"tipo": "inicio", "config": {
@@ -353,7 +355,9 @@ def crear_app(
         plan = str(data.get("synthesis", "")).strip()
         if not plan:
             raise HTTPException(422, "El transcript no contiene una síntesis.")
-        repo_objetivo = str(cuerpo.get("repo") or repo)
+        # Confinado al repo servido: NO se aplica un plan en una ruta arbitraria
+        # del cuerpo (agujero de escritura remota vía navegador — auto-auditoría).
+        repo_objetivo = repo
         app.state.ejecutando = True
         _emitir({"tipo": "ejecucion_inicio", "transcript": nombre, "repo": repo_objetivo})
         threading.Thread(
