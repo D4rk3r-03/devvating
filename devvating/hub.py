@@ -236,9 +236,12 @@ def crear_app(
                 continue
             if msg.get("tipo") == "ejecucion_fin":
                 # Queda pendiente la decisión del vocero (commit/descartar).
+                # Guardamos el returncode: si el backend falló, el commit se
+                # bloquea (no presentar éxito sobre un plan roto — hallazgo de
+                # la auto-auditoría; el descarte sigue disponible).
                 app.state.ultima_ejecucion = {
                     "rama": msg["rama"], "base": msg.get("rama_base", ""),
-                    "repo": msg["repo"],
+                    "repo": msg["repo"], "returncode": msg.get("returncode", 0),
                 }
             app.state.historial.append(msg)
             for ws in set(app.state.clientes):
@@ -376,6 +379,12 @@ def crear_app(
         ue = app.state.ultima_ejecucion
         if not ue:
             raise HTTPException(409, "No hay una ejecución lista para commitear.")
+        if ue.get("returncode", 0) != 0:
+            raise HTTPException(
+                409,
+                f"La ejecución falló (código {ue['returncode']}): el plan no se "
+                "aplicó limpio. Revisa el diff y descarta; no se commitea un fallo.",
+            )
         mensaje = str(cuerpo.get("mensaje") or "").strip()
         if not mensaje:
             raise HTTPException(422, "El mensaje de commit no puede estar vacío.")

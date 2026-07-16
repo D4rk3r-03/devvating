@@ -318,6 +318,18 @@ class _BackendEscritor:
         return 0, "ok"
 
 
+class _BackendFallido:
+    """Backend que escribe algo a medias y sale con código != 0."""
+
+    name = "stub-fallido"
+
+    def run(self, prompt, cwd, allow_commands):
+        from pathlib import Path
+
+        Path(cwd, "roto.txt").write_text("a medias\n", encoding="utf-8")
+        return 1, "boom: el plan reventó"
+
+
 class TestEjecucion:
     @staticmethod
     def _ignorar_transcripts(repo):
@@ -413,6 +425,22 @@ class TestEjecucion:
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
         with TestClient(app) as c:
             assert c.post("/api/commit", json={"mensaje": "x"}).status_code == 409
+
+    def test_ejecucion_fallida_bloquea_commit_pero_permite_descartar(self, git_repo):
+        # Hallazgo de la auto-auditoría: un returncode != 0 no debe presentarse
+        # como éxito commiteable. El diff se muestra (para revisar), pero el
+        # commit se bloquea; descartar sigue disponible.
+        from devvating import gitutil
+        self._ignorar_transcripts(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendFallido())
+        with TestClient(app) as c:
+            fin = self._ejecutar_hasta_fin(c)
+            assert fin["returncode"] == 1  # el fallo viaja en el evento
+            r = c.post("/api/commit", json={"mensaje": "no debería"})
+            assert r.status_code == 409 and "falló" in r.json()["detail"]
+            assert c.post("/api/descartar").status_code == 200  # descartar sí
+        assert gitutil.current_branch(str(git_repo)) == "main"
 
     def test_repo_sucio_reporta_error_amable(self, git_repo):
         self._ignorar_transcripts(git_repo)

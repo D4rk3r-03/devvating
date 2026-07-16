@@ -499,7 +499,8 @@ export default function App() {
           )}
 
           {ejecucion && (
-            <div className={`panel-ejecucion glass-panel animate-fade-in ${ejecucion.estado}`}>
+            <div className={`panel-ejecucion glass-panel animate-fade-in ${ejecucion.estado}`
+              + (ejecucion.estado === "fin" && ejecucion.returncode !== 0 ? " fin-con-error" : "")}>
               {ejecucion.estado === "corriendo" && (
                 <h3><RefreshCw size={16} className="girando" /> Ejecutando el plan — {ejecucion.detalle}</h3>
               )}
@@ -511,9 +512,11 @@ export default function App() {
               )}
               {ejecucion.estado === "fin" && (
                 <>
-                  <h3><GitBranch size={16} /> Cambios en staging · rama <code>{ejecucion.rama}</code></h3>
-                  {ejecucion.returncode !== 0 && (
-                    <p className="aviso-feed">el backend salió con código {ejecucion.returncode}</p>
+                  {ejecucion.returncode !== 0 ? (
+                    <h3><TriangleAlert size={16} /> El plan no se aplicó limpio (código{" "}
+                      {ejecucion.returncode}) · rama <code>{ejecucion.rama}</code></h3>
+                  ) : (
+                    <h3><GitBranch size={16} /> Cambios en staging · rama <code>{ejecucion.rama}</code></h3>
                   )}
                   {ejecucion.archivos.length === 0 ? (
                     <p>El ejecutor no produjo cambios.</p>
@@ -538,6 +541,18 @@ export default function App() {
                         : <>Descartado: volviste a <code>{cierre.base}</code> y la rama de
                             ejecución se borró. El repo quedó como estaba.</>}
                     </p>
+                  ) : ejecucion.returncode !== 0 ? (
+                    <div className="acciones-cierre">
+                      <p className="pista-cierre fallo">
+                        El backend terminó con error: el plan quedó a medias. Revisa el diff
+                        de arriba, pero <b>no se ofrece commit</b> — commitear un fallo
+                        presentaría éxito sobre un plan roto. Descarta para volver a{" "}
+                        <code>{ejecucion.rama_base}</code>.
+                      </p>
+                      <button className="descartar" onClick={descartar}>
+                        <Trash2 size={14} /> Descartar
+                      </button>
+                    </div>
                   ) : ejecucion.archivos.length > 0 ? (
                     <div className="acciones-cierre">
                       <label>Mensaje de commit (editable)

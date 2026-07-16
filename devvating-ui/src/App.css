@@ -254,6 +254,9 @@
 .panel-ejecucion:hover { transform: none; }
 .panel-ejecucion.error { border-left-color: var(--danger); }
 .panel-ejecucion.fin { border-left-color: var(--success); }
+/* Ejecución que terminó con fallo del backend: NO es éxito, borde de aviso. */
+.panel-ejecucion.fin-con-error { border-left-color: var(--warning); }
+.pista-cierre.fallo { color: var(--warning); }
 .panel-ejecucion h3 {
   display: flex; align-items: center; gap: .5rem; font-size: .92rem;
   margin-bottom: .5rem;
