@@ -18,10 +18,18 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 
 from ..tools.registry import ToolRegistry
-from .base import AgentError, SessionLimitError, TransientProviderError, TurnUsage
+from .base import (
+    AgentCancelledError,
+    AgentError,
+    SessionLimitError,
+    TransientProviderError,
+    TurnUsage,
+)
 
 
 class CliAdapterError(AgentError):
@@ -70,20 +78,53 @@ def env_suscripcion() -> dict[str, str]:
     }
 
 
-def _run(argv: list[str], cwd: str, timeout: int, name: str) -> subprocess.CompletedProcess:
+def _run(
+    argv: list[str], cwd: str, timeout: int, name: str, cancel_event=None
+) -> subprocess.CompletedProcess:
+    """Corre el CLI. Con `cancel_event` (objeto con .is_set()) el turno es
+    INTERRUMPIBLE: si el vocero cancela, se mata el subprocess al instante en
+    vez de esperar minutos a que termine. Sin evento, se comporta como antes.
+    """
     try:
-        return subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-            env=env_suscripcion(),
+        proc = subprocess.Popen(
+            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env_suscripcion(),
+            # Grupo de procesos propio: al cancelar/timeout matamos el árbol
+            # entero (el CLI puede lanzar hijos; matar solo el padre los deja
+            # huérfanos reteniendo los pipes → communicate colgaría).
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise CliAdapterError(
             f"No se encontró el binario '{argv[0]}'. ¿Está instalado el CLI de {name}?"
         ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CliAdapterError(
-            f"El CLI de {name} superó el timeout de {timeout}s."
-        ) from exc
+
+    inicio = time.monotonic()
+    while True:
+        try:
+            # communicate lee stdout/stderr en paralelo (sin deadlock por pipe
+            # lleno) y, tras TimeoutExpired, reintentar no pierde salida.
+            out, err = proc.communicate(timeout=0.5)
+            return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            if cancel_event is not None and cancel_event.is_set():
+                _matar_grupo(proc)
+                raise AgentCancelledError(f"{name}: turno cancelado por el vocero.")
+            if time.monotonic() - inicio > timeout:
+                _matar_grupo(proc)
+                raise CliAdapterError(f"El CLI de {name} superó el timeout de {timeout}s.")
+
+
+def _matar_grupo(proc: subprocess.Popen) -> None:
+    """Mata el árbol de procesos del CLI (grupo) y drena los pipes."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()  # el grupo ya murió, o no aplica: mata al menos el padre
+    try:
+        proc.communicate(timeout=5)
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
 
 
 class ClaudeCliAdapter:
@@ -101,6 +142,8 @@ class ClaudeCliAdapter:
         self.cwd = cwd
         self.timeout = timeout
         self.last_usage: TurnUsage | None = None
+        # Señal de cancelación (la fija el orquestador); None = no cancelable.
+        self.cancel_event = None
 
     def build_argv(self, system: str, prompt: str) -> list[str]:
         # Solo herramientas de lectura: el debate nunca escribe (D5).
@@ -114,7 +157,8 @@ class ClaudeCliAdapter:
 
     def converse(self, system: str, prompt: str, registry: ToolRegistry) -> str:
         self.last_usage = None
-        proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout, "Claude Code")
+        proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout,
+                    "Claude Code", self.cancel_event)
         if proc.returncode != 0:
             detalle = (proc.stderr or proc.stdout).strip()[:500]
             raise clasificar_fallo(detalle, f"claude -p salió con código {proc.returncode}")
@@ -167,6 +211,7 @@ class PlainCliAdapter:
         self.timeout = timeout
         self.extra_args = list(extra_args or [])
         self.last_usage: TurnUsage | None = None
+        self.cancel_event = None  # la fija el orquestador; None = no cancelable
 
     def build_argv(self, system: str, prompt: str) -> list[str]:
         combinado = f"INSTRUCCIONES DE SISTEMA (tu rol):\n{system}\n\n{prompt}"
@@ -174,7 +219,8 @@ class PlainCliAdapter:
 
     def converse(self, system: str, prompt: str, registry: ToolRegistry) -> str:
         self.last_usage = None
-        proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout, self.name)
+        proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout,
+                    self.name, self.cancel_event)
         if proc.returncode != 0:
             detalle = (proc.stderr or proc.stdout).strip()[:500]
             raise clasificar_fallo(

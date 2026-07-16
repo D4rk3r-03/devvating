@@ -40,7 +40,12 @@ from . import gitutil, reporte, roles, rotation
 from .config import Config
 from .debate import _load_partial_session, _save_transcript
 from .executor import ClaudeCodeBackend, ExecutionPlan, Executor, ExecutorError
-from .orchestrator import DebateAbortedError, DebateTopic, Orchestrator
+from .orchestrator import (
+    DebateAbortedError,
+    DebateCancelledError,
+    DebateTopic,
+    Orchestrator,
+)
 
 # La intervención del vocero espera hasta este tope y luego continúa sin nota
 # (el debate no debe quedar rehén de una pestaña cerrada).
@@ -69,6 +74,7 @@ def _debate_worker(
     fabrica_par: Callable,
     esperar_nota: Callable[[int], str | None] | None = None,
     old_session=None,
+    cancel_event=None,
 ) -> None:
     """Corre un debate completo en un hilo, emitiendo eventos JSON-planos.
 
@@ -125,7 +131,17 @@ def _debate_worker(
             deep_mode=bool(config.get("profundo", False)),
             on_intervention=on_intervention,
             old_session=old_session,
+            cancel_event=cancel_event,
         )
+    except DebateCancelledError as exc:
+        # Cancelación del vocero: corte limpio con transcript parcial reanudable.
+        parcial = (
+            _save_transcript(exc.session, repo, parcial=True).name
+            if exc.session.turns else None
+        )
+        emitir({"tipo": "cancelado", "parcial": parcial})
+        emitir({"tipo": "cerrado"})
+        return
     except DebateAbortedError as exc:
         parcial = None
         if exc.session.turns:
@@ -215,6 +231,10 @@ def crear_app(
     # nota del vocero que llega por POST /api/intervencion.
     app.state.notas = queue.Queue()
     app.state.intervencion_abierta = False
+    # Señal de cancelación del debate en curso: la fija POST /api/debates/cancelar
+    # y la leen el orquestador (entre turnos) y los adaptadores CLI (matan su
+    # subprocess en vuelo). Se limpia al lanzar cada debate.
+    app.state.cancelar_event = threading.Event()
     # Última ejecución con cambios en staging, a la espera de que el vocero
     # decida: commit en la rama o descartar. None = nada pendiente.
     app.state.ultima_ejecucion = None
@@ -318,6 +338,7 @@ def crear_app(
         config = {**config, "tema": tema, "repo": repo}
         app.state.corriendo = True
         app.state.historial = []
+        app.state.cancelar_event.clear()  # empezamos sin cancelación pendiente
         _emitir({"tipo": "inicio", "config": {
             "tema": tema, "agentes": agentes,
             "rounds": config.get("rounds", 2),
@@ -328,9 +349,23 @@ def crear_app(
         }})
         threading.Thread(
             target=_debate_worker,
-            args=(config, _emitir, fabrica_par, _esperar_nota, old_session),
+            args=(config, _emitir, fabrica_par, _esperar_nota, old_session,
+                  app.state.cancelar_event),
             daemon=True,
         ).start()
+        return {"ok": True}
+
+    @app.post("/api/debates/cancelar")
+    def cancelar_debate() -> dict:
+        """Cancela el debate en curso: corte limpio con transcript parcial.
+
+        Fija la señal; el orquestador la ve entre turnos y los adaptadores CLI
+        matan su subprocess en vuelo, así que la cancelación es inmediata sin
+        esperar a que termine el turno actual.
+        """
+        if not app.state.corriendo:
+            raise HTTPException(409, "No hay ningún debate en curso.")
+        app.state.cancelar_event.set()
         return {"ok": True}
 
     @app.post("/api/intervencion")

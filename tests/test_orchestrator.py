@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from devvating import roles
-from devvating.orchestrator import DebateTopic, Orchestrator, _parse_verdict
+from devvating.orchestrator import (
+    DebateCancelledError,
+    DebateTopic,
+    Orchestrator,
+    _parse_verdict,
+)
 from tests.conftest import StubAdapter
 
 TOPIC = DebateTopic(prompt="¿Refactor X?", context_hint="a.py")
@@ -177,3 +184,35 @@ class TestMinRounds:
             max_rounds=3,
         )
         assert s.converged and s.converged_round == 1
+
+
+class TestCancelacion:
+    def test_cancel_preseteado_corta_antes_del_primer_turno(self):
+        ev = threading.Event()
+        ev.set()  # ya cancelado antes de empezar
+        a = StubAdapter("claude", ["A0"])
+        b = StubAdapter("gemini", ["B0"])
+        orch = Orchestrator(a, b, repo_root=".")
+        with pytest.raises(DebateCancelledError) as ei:
+            orch.run(TOPIC, max_rounds=1, cancel_event=ev)
+        assert ei.value.session.turns == []  # no se corrió ni un turno
+        assert a.llamadas == []
+
+    def test_cancel_a_mitad_conserva_turnos_previos(self):
+        ev = threading.Event()
+
+        class CancelaTrasResponder(StubAdapter):
+            def converse(self, system, prompt, registry):
+                out = super().converse(system, prompt, registry)
+                ev.set()  # el orquestador lo ve antes del siguiente turno
+                return out
+
+        a = CancelaTrasResponder("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
+        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+        orch = Orchestrator(a, b, repo_root=".")
+        with pytest.raises(DebateCancelledError) as ei:
+            orch.run(TOPIC, max_rounds=1, cancel_event=ev)
+        # a hizo su propuesta; el corte cae antes del turno de b. Turno a salvo.
+        turns = ei.value.session.turns
+        assert len(turns) == 1 and turns[0].agent == "claude"
+        assert turns[0].phase == "propuesta"

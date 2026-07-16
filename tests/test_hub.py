@@ -204,6 +204,51 @@ class TestIntervencion:
         assert not any("NOTA DEL VOCERO" in p for _, p in fabrica.a.llamadas)
 
 
+class TestCancelar:
+    def test_cancelar_sin_debate_es_409(self, tmp_path):
+        app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            assert c.post("/api/debates/cancelar").status_code == 409
+
+    def test_cancelar_debate_en_curso_emite_cancelado(self, tmp_path):
+        import threading
+
+        en_turno = threading.Event()
+
+        class BloqueaEnPrimera(StubAdapter):
+            def converse(self, system, prompt, registry):
+                en_turno.set()          # avisa que estamos en el primer turno
+                time.sleep(0.3)         # da tiempo a que llegue la cancelación
+                return super().converse(system, prompt, registry)
+
+        def fabrica(nombres, cfg, repo):
+            a = BloqueaEnPrimera("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
+            b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+            return a, b
+
+        app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as ws:
+                ws.receive_json()  # historial
+                c.post("/api/debates", json={
+                    "tema": "t", "agentes": ["claude-cli", "gemini-api"], "rounds": 1,
+                })
+                assert en_turno.wait(timeout=5)  # el 1er agente ya está en turno
+                assert c.post("/api/debates/cancelar").status_code == 200
+                visto = False
+                for _ in range(80):
+                    msg = ws.receive_json()
+                    if msg["tipo"] == "cancelado":
+                        visto = True
+                        break
+                    if msg["tipo"] in ("fin", "error"):
+                        pytest.fail(f"esperaba cancelado, llegó {msg['tipo']}")
+                assert visto
+        # El transcript parcial quedó guardado (reanudable).
+        parciales = list((tmp_path / "transcripts").glob("*.partial.json"))
+        assert len(parciales) == 1
+
+
 class TestReanudar:
     def _guardar_parcial(self, repo):
         """Escribe un .partial.json con la apertura (round 0) ya pagada."""

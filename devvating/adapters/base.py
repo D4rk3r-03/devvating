@@ -42,6 +42,15 @@ class SessionLimitError(AgentError):
         self.resets_at = resets_at
 
 
+class AgentCancelledError(AgentError):
+    """El vocero canceló el debate mientras el turno estaba en vuelo.
+
+    No es un fallo: el adaptador mató su propio subprocess al ver la señal de
+    cancelación. No reintentable; el orquestador lo convierte en corte limpio
+    con transcript parcial (reanudable).
+    """
+
+
 @dataclass
 class TurnUsage:
     """Tokens y costo de un turno. `cost_usd` es None si no hay tarifa conocida."""

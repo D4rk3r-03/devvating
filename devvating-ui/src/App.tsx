@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import {
-  Check, FileText, GitBranch, Hand, Play, RefreshCw, RotateCcw, Scale, Send,
+  Ban, Check, FileText, GitBranch, Hand, Play, RefreshCw, RotateCcw, Scale, Send,
   Swords, Trash2, TriangleAlert,
 } from "lucide-react";
 import "./App.css";
@@ -24,7 +24,8 @@ type Msg =
   | { tipo: "ejecucion_fin"; rama: string; rama_base: string; returncode: number; archivos: string[]; diff: string }
   | { tipo: "ejecucion_error"; mensaje: string }
   | { tipo: "commit_fin"; sha: string; rama: string }
-  | { tipo: "descartar_fin"; base: string; rama: string };
+  | { tipo: "descartar_fin"; base: string; rama: string }
+  | { tipo: "cancelado"; parcial: string | null };
 
 type Item =
   | { clase: "separador"; texto: string }
@@ -137,7 +138,7 @@ export default function App() {
         setMsgs(m.eventos); setCorriendo(m.corriendo);
       } else {
         setMsgs((prev) => [...prev, m]);
-        if (m.tipo === "fin" || m.tipo === "error") {
+        if (m.tipo === "fin" || m.tipo === "error" || m.tipo === "cancelado") {
           setCorriendo(false); cargarTranscripts();
         }
       }
@@ -147,12 +148,13 @@ export default function App() {
   }, []);
 
   // Reducción de mensajes → items del feed + turno pendiente + paneles.
-  const { items, pendiente, config, fin, error, intervencion, ejecucion, cierre } = useMemo(() => {
+  const { items, pendiente, config, fin, error, cancelado, intervencion, ejecucion, cierre } = useMemo(() => {
     const items: Item[] = [];
     let pendiente: { agente: string; fase: string } | null = null;
     let config: Extract<Msg, { tipo: "inicio" }>["config"] | null = null;
     let fin: Extract<Msg, { tipo: "fin" }> | null = null;
     let error: Extract<Msg, { tipo: "error" }> | null = null;
+    let cancelado: Extract<Msg, { tipo: "cancelado" }> | null = null;
     let intervencion: { ronda: number } | null = null;
     let ejecucion:
       | { estado: "corriendo"; detalle: string }
@@ -167,6 +169,7 @@ export default function App() {
       if (m.tipo === "inicio") config = m.config;
       else if (m.tipo === "fin") { fin = m; pendiente = null; }
       else if (m.tipo === "error") { error = m; pendiente = null; }
+      else if (m.tipo === "cancelado") { cancelado = m; pendiente = null; intervencion = null; }
       else if (m.tipo === "intervencion_pendiente") intervencion = { ronda: m.ronda };
       else if (m.tipo === "intervencion_resuelta") {
         intervencion = null;
@@ -200,7 +203,7 @@ export default function App() {
         }
       }
     }
-    return { items, pendiente, config, fin, error, intervencion, ejecucion, cierre };
+    return { items, pendiente, config, fin, error, cancelado, intervencion, ejecucion, cierre };
   }, [msgs]);
 
   useEffect(() => {
@@ -233,6 +236,11 @@ export default function App() {
     });
     if (r.ok) setCorriendo(true);
     else setAviso((await r.json()).detail ?? "No se pudo lanzar el debate.");
+  };
+
+  const cancelarDebate = async () => {
+    const r = await fetch("/api/debates/cancelar", { method: "POST" });
+    if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo cancelar el debate.");
   };
 
   const enviarNota = async (texto: string) => {
@@ -410,6 +418,12 @@ export default function App() {
             {" · "}≤{config.rounds} rondas{config.profundo ? " · profundo" : ""}
             {config.sesgos && config.sesgos.length === 2 ? ` · ${config.sesgos.join("/")}` : ""}
           </span>}
+          {corriendo && (
+            <button className="cancelar-debate" onClick={cancelarDebate}
+              title="Detener el debate en curso (se guarda lo hecho para reanudar)">
+              <Ban size={14} /> Cancelar
+            </button>
+          )}
         </header>
 
         <section className="feed">
@@ -469,6 +483,24 @@ export default function App() {
                     <RotateCcw size={15} /> Reanudar debate
                   </button>
                 </>
+              )}
+            </div>
+          )}
+
+          {cancelado && (
+            <div className="panel-cancelado glass-panel">
+              <h3><Ban size={16} /> Debate cancelado</h3>
+              {cancelado.parcial ? (
+                <>
+                  <p>Lo detuviste. Los turnos completados quedaron a salvo en{" "}
+                    <code>{cancelado.parcial}</code>.</p>
+                  <button className="reanudar" onClick={() => reanudar(cancelado.parcial!)}
+                    disabled={corriendo}>
+                    <RotateCcw size={15} /> Reanudar debate
+                  </button>
+                </>
+              ) : (
+                <p>Lo detuviste antes de que hubiera turnos completados.</p>
               )}
             </div>
           )}

@@ -23,6 +23,7 @@ from typing import Callable
 from . import roles
 from .adapters.base import (
     AgentAdapter,
+    AgentCancelledError,
     AgentError,
     SessionLimitError,
     TransientProviderError,
@@ -43,6 +44,14 @@ class DebateAbortedError(RuntimeError):
         super().__init__(str(causa))
         self.session = session
         self.causa = causa
+
+
+class DebateCancelledError(RuntimeError):
+    """El vocero canceló el debate; lleva la sesión parcial (reanudable)."""
+
+    def __init__(self, session: "DebateSession") -> None:
+        super().__init__("Debate cancelado por el vocero.")
+        self.session = session
 
 _VERDICT_RE = re.compile(r"\[\s*CONVERGENCIA\s*:\s*(S[IÍ]|NO)\s*\]", re.IGNORECASE)
 
@@ -165,19 +174,34 @@ class Orchestrator:
         deep_mode: bool = False,
         on_intervention: InterventionCb | None = None,
         old_session: DebateSession | None = None,
+        cancel_event=None,
     ) -> DebateSession:
         session = DebateSession(topic=topic, deep_mode=deep_mode)
         registry = self._registry()
+        # La señal de cancelación llega a los adaptadores CLI para que maten su
+        # subprocess en vuelo; el orquestador también la chequea entre turnos.
+        self._cancel_event = cancel_event
+        for agent in self.agents:
+            if hasattr(agent, "cancel_event"):
+                agent.cancel_event = cancel_event
         try:
             return self._correr(
                 session, topic, registry, max_rounds, min_rounds, synthesizer_index,
                 deep_mode, on_intervention, old_session
             )
+        except (AgentCancelledError, DebateCancelledError):
+            # Cancelación limpia (no fallo): sesión parcial reanudable.
+            session.usage_totals = self._totalizar(session)
+            raise DebateCancelledError(session)
         except AgentError as exc:
             # Fallo irrecuperable: totalizar lo pagado y entregar la sesión
             # parcial — los turnos completados nunca se pierden (plan §13).
             session.usage_totals = self._totalizar(session)
             raise DebateAbortedError(session, exc) from exc
+
+    def _cancelado(self) -> bool:
+        ev = getattr(self, "_cancel_event", None)
+        return ev is not None and ev.is_set()
 
     def _correr(
         self,
@@ -204,6 +228,8 @@ class Orchestrator:
         self._on_event("ronda", "apertura a ciegas", None)
         positions: dict[str, str] = {}
         for agent in self.agents:
+            if self._cancelado():
+                raise DebateCancelledError(session)
             self._on_event("propuesta_inicio", agent.name, None)
             existente = _get_turn(0, "propuesta", agent.name)
             if existente:
@@ -233,6 +259,8 @@ class Orchestrator:
             new_positions: dict[str, str] = {}
             verdicts: dict[str, str | None] = {}
             for agent in self.agents:
+                if self._cancelado():
+                    raise DebateCancelledError(session)
                 other = self._other(agent)
                 self._on_event("replica_inicio", agent.name, None)
                 existente = _get_turn(r, "replica", agent.name)
@@ -270,6 +298,8 @@ class Orchestrator:
         if deep_mode:
             self._on_event("ronda", "inversión (modo profundo)", None)
             for agent in self.agents:
+                if self._cancelado():
+                    raise DebateCancelledError(session)
                 other = self._other(agent)
                 self._on_event("inversion_inicio", agent.name, None)
                 existente = _get_turn(session.rounds_run, "inversion", agent.name)
@@ -292,6 +322,8 @@ class Orchestrator:
                 self._on_event("inversion_fin", agent.name, text)
 
         # --- Síntesis (agente rotativo) -------------------------------------
+        if self._cancelado():
+            raise DebateCancelledError(session)
         synth = self.agents[synthesizer_index % len(self.agents)]
         self._on_event("ronda", "síntesis", None)
         self._on_event("sintesis_inicio", synth.name, None)

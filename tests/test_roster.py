@@ -105,6 +105,21 @@ class TestNuevosAdaptadores:
         assert adapter.converse("S", "P", REG) == "postura de kimi"
         assert adapter.last_usage is None
 
+    def test_cancelacion_mata_el_subprocess_sin_esperar(self, fake_bin, tmp_path):
+        import threading
+        import time
+        from devvating.adapters.base import AgentCancelledError
+
+        ev = threading.Event()
+        ev.set()  # cancelación ya pedida
+        adapter = KimiCliAdapter(
+            binary=fake_bin("kimi", 'sleep 5; echo "tarde"'), cwd=str(tmp_path))
+        adapter.cancel_event = ev
+        t0 = time.monotonic()
+        with pytest.raises(AgentCancelledError):
+            adapter.converse("S", "P", REG)
+        assert time.monotonic() - t0 < 3  # no esperó los 5s del sleep
+
     def test_no_hereda_claves_google_al_subprocess(self, fake_bin, tmp_path, monkeypatch):
         # Trampa gemela a la de ANTHROPIC_API_KEY: si el CLI de Google ve
         # GEMINI_API_KEY o un proyecto GCP, desvía la facturación del login.
