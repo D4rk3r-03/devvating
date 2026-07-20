@@ -21,13 +21,14 @@ import asyncio
 import json
 import queue
 import re
+import secrets
 import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
 try:
-    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.responses import FileResponse, HTMLResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError as exc:  # pragma: no cover - guard de instalación
@@ -238,6 +239,20 @@ def crear_app(
     # Última ejecución con cambios en staging, a la espera de que el vocero
     # decida: commit en la rama o descartar. None = nada pendiente.
     app.state.ultima_ejecucion = None
+    # Token anti-CSRF (paso 0, auto-auditoría): sin él, cualquier página abierta
+    # en el mismo navegador podría disparar POST /api/ejecutar (y el resto de
+    # endpoints mutantes) contra localhost vía fetch. Se genera por proceso, se
+    # entrega en /api/roster (que el front carga al montar) y un atacante
+    # cross-origin no puede leerlo por la política de mismo origen — solo
+    # puede disparar la petición, no leer la respuesta que lo contiene.
+    app.state.csrf_token = secrets.token_urlsafe(32)
+
+    def _requiere_csrf(request: Request) -> None:
+        recibido = request.headers.get("X-Devvating-CSRF", "")
+        if not secrets.compare_digest(recibido, app.state.csrf_token):
+            raise HTTPException(403, "Falta o es inválido el token CSRF (X-Devvating-CSRF).")
+
+    _csrf = Depends(_requiere_csrf)
 
     @app.on_event("startup")
     async def _arrancar() -> None:
@@ -297,6 +312,9 @@ def crear_app(
             "agentes": banco.nombres(),
             "alias": dict(banco.ALIAS),
             "sesgos": list(roles.SESGOS),
+            # El front lo guarda al montar y lo reenvía en cada POST mutante
+            # (X-Devvating-CSRF). Ver _requiere_csrf.
+            "csrf_token": app.state.csrf_token,
         }
 
     @app.get("/api/estado")
@@ -308,7 +326,7 @@ def crear_app(
             "eventos": len(app.state.historial),
         }
 
-    @app.post("/api/debates", status_code=202)
+    @app.post("/api/debates", status_code=202, dependencies=[_csrf])
     def lanzar(config: dict) -> dict:
         if app.state.corriendo:
             raise HTTPException(409, "Ya hay un debate en curso (v1: uno a la vez).")
@@ -355,7 +373,7 @@ def crear_app(
         ).start()
         return {"ok": True}
 
-    @app.post("/api/debates/cancelar")
+    @app.post("/api/debates/cancelar", dependencies=[_csrf])
     def cancelar_debate() -> dict:
         """Cancela el debate en curso: corte limpio con transcript parcial.
 
@@ -368,7 +386,7 @@ def crear_app(
         app.state.cancelar_event.set()
         return {"ok": True}
 
-    @app.post("/api/intervencion")
+    @app.post("/api/intervencion", dependencies=[_csrf])
     def intervenir(cuerpo: dict) -> dict:
         """Recibe la nota del vocero (Fase 2). Nota vacía/null = continuar."""
         if not app.state.intervencion_abierta:
@@ -376,7 +394,7 @@ def crear_app(
         app.state.notas.put(str(cuerpo.get("nota") or "").strip())
         return {"ok": True}
 
-    @app.post("/api/ejecutar", status_code=202)
+    @app.post("/api/ejecutar", status_code=202, dependencies=[_csrf])
     def ejecutar(cuerpo: dict) -> dict:
         """Fase 3: aplica la síntesis de un transcript en una rama del repo.
 
@@ -407,7 +425,7 @@ def crear_app(
         ).start()
         return {"ok": True}
 
-    @app.post("/api/commit")
+    @app.post("/api/commit", dependencies=[_csrf])
     def commit_cambios(cuerpo: dict) -> dict:
         """Confirma en la rama devvating/ los cambios en staging (gatillo del vocero).
 
@@ -435,7 +453,7 @@ def crear_app(
         _emitir({"tipo": "commit_fin", "sha": sha, "rama": ue["rama"]})
         return {"ok": True, "sha": sha}
 
-    @app.post("/api/descartar")
+    @app.post("/api/descartar", dependencies=[_csrf])
     def descartar_cambios() -> dict:
         """Deshace la ejecución: vuelve a la rama base y borra la devvating/."""
         ue = app.state.ultima_ejecucion
@@ -460,7 +478,7 @@ def crear_app(
             r["actual"] = r["nombre"] == actual
         return {"ramas": lista, "actual": actual}
 
-    @app.post("/api/ramas/borrar")
+    @app.post("/api/ramas/borrar", dependencies=[_csrf])
     def borrar_rama(cuerpo: dict) -> dict:
         """Borra una rama de ejecución. Solo devvating/, nunca la rama actual."""
         nombre = str(cuerpo.get("rama") or "")

@@ -86,9 +86,9 @@ class TestBackoffEnOrquestador:
     def test_transitorio_se_reintenta_y_el_debate_termina(self):
         a = StubAdapter("claude", [
             TransientProviderError("503"), TransientProviderError("503"),
-            "A0", "A1 [CONVERGENCIA: SÍ]", "síntesis",
+            "A0", 'A1 {"convergencia": true}', "síntesis",
         ])
-        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
         orch, dormido = _orq(a, b)
         s = orch.run(TOPIC, max_rounds=1)
         assert s.synthesis == "síntesis"
@@ -129,8 +129,8 @@ class TestBackoffEnOrquestador:
     def test_emite_eventos_de_reintento(self):
         eventos: list[tuple[str, str]] = []
         a = StubAdapter("claude", [TransientProviderError("503"), "A0",
-                                   "A1 [CONVERGENCIA: SÍ]", "síntesis"])
-        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+                                   'A1 {"convergencia": true}', "síntesis"])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
         orch = Orchestrator(a, b, repo_root=".", retry_waits=(1,),
                             sleep=lambda _: None,
                             on_event=lambda ev, ag, tx: eventos.append((ev, ag)))

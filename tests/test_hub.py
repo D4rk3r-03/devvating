@@ -13,8 +13,8 @@ from tests.conftest import StubAdapter
 
 
 def _fabrica_stub(nombres, cfg, repo):
-    a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis del hub"])
-    b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+    a = StubAdapter("claude", ["A0", 'A1 {"convergencia": true}', "síntesis del hub"])
+    b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
     return a, b
 
 
@@ -41,8 +41,8 @@ class TestWorker:
         # el par por defecto y exige 2 rondas antes de honrar la convergencia.
         def fabrica(nombres, cfg, repo):
             a = StubAdapter("claude#1",
-                            ["A0", "A1 [CONVERGENCIA: SÍ]", "A2 [CONVERGENCIA: SÍ]", "s"])
-            b = StubAdapter("claude#2", ["B0", "B1 [CONVERGENCIA: SÍ]", "B2 [CONVERGENCIA: SÍ]"])
+                            ["A0", 'A1 {"convergencia": true}', 'A2 {"convergencia": true}', "s"])
+            b = StubAdapter("claude#2", ["B0", 'B1 {"convergencia": true}', 'B2 {"convergencia": true}'])
             fabrica.a = a
             return a, b
 
@@ -74,6 +74,7 @@ class TestWorker:
 def cliente(tmp_path):
     app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
     with TestClient(app) as c:
+        c.headers["X-Devvating-CSRF"] = app.state.csrf_token
         yield c, tmp_path
 
 
@@ -110,8 +111,8 @@ class TestApi:
         arranca = threading.Event()
 
         def fabrica_lenta(nombres, cfg, repo):
-            a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
-            lenta = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+            a = StubAdapter("claude", ["A0", 'A1 {"convergencia": true}', "s"])
+            lenta = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
             original = lenta.converse
 
             def frenada(*args, **kw):
@@ -123,6 +124,7 @@ class TestApi:
 
         app = crear_app(repo=str(tmp_path), fabrica_par=fabrica_lenta)
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             assert c.post("/api/debates", json=CONFIG).status_code == 202
             assert c.post("/api/debates", json=CONFIG).status_code == 409
             arranca.set()
@@ -153,17 +155,47 @@ class TestApi:
         assert r.status_code == 200
         assert "npm run build" in r.text or "<div id=\"root\">" in r.text
 
+
+class TestCsrf:
+    """Paso 0 (auto-auditoría): POST mutante sin token válido se rechaza."""
+
+    def test_roster_entrega_el_token(self, cliente):
+        c, _ = cliente
+        r = c.get("/api/roster").json()
+        assert r["csrf_token"]
+
+    def test_post_sin_token_es_403(self, tmp_path):
+        app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            assert c.post("/api/debates", json=CONFIG).status_code == 403
+            assert c.post("/api/debates/cancelar").status_code == 403
+            assert c.post("/api/descartar").status_code == 403
+
+    def test_post_con_token_equivocado_es_403(self, tmp_path):
+        app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = "no-soy-el-token"
+            assert c.post("/api/debates", json=CONFIG).status_code == 403
+
+    def test_post_con_token_correcto_pasa(self, tmp_path):
+        app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            assert c.post("/api/debates", json=CONFIG).status_code == 202
+
+
 class TestIntervencion:
     def test_flujo_completo_de_intervencion(self, tmp_path):
         """El debate espera la nota del vocero y la inyecta en la ronda."""
         def fabrica(nombres, cfg, repo):
-            a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
-            b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+            a = StubAdapter("claude", ["A0", 'A1 {"convergencia": true}', "s"])
+            b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
             fabrica.a = a
             return a, b
 
         app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             # Sin intervención pendiente, el endpoint rechaza.
             assert c.post("/api/intervencion", json={"nota": "x"}).status_code == 409
             c.post("/api/debates", json={**CONFIG, "interactivo": True})
@@ -184,13 +216,14 @@ class TestIntervencion:
 
     def test_nota_vacia_continua_sin_nota(self, tmp_path):
         def fabrica(nombres, cfg, repo):
-            a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
-            b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+            a = StubAdapter("claude", ["A0", 'A1 {"convergencia": true}', "s"])
+            b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
             fabrica.a = a
             return a, b
 
         app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             c.post("/api/debates", json={**CONFIG, "interactivo": True})
             for _ in range(100):
                 if c.get("/api/estado").json()["intervencion_abierta"]:
@@ -208,6 +241,7 @@ class TestCancelar:
     def test_cancelar_sin_debate_es_409(self, tmp_path):
         app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             assert c.post("/api/debates/cancelar").status_code == 409
 
     def test_cancelar_debate_en_curso_emite_cancelado(self, tmp_path):
@@ -222,12 +256,13 @@ class TestCancelar:
                 return super().converse(system, prompt, registry)
 
         def fabrica(nombres, cfg, repo):
-            a = BloqueaEnPrimera("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
-            b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+            a = BloqueaEnPrimera("claude", ["A0", 'A1 {"convergencia": true}', "s"])
+            b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
             return a, b
 
         app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             with c.websocket_connect("/ws") as ws:
                 ws.receive_json()  # historial
                 c.post("/api/debates", json={
@@ -273,14 +308,15 @@ class TestReanudar:
     def test_reanuda_sin_repetir_turnos_pagados(self, tmp_path):
         def fabrica(nombres, cfg, repo):
             # Solo lo que FALTA: la apertura viene del parcial, no se re-corre.
-            a = StubAdapter("claude", ["A1 [CONVERGENCIA: SÍ]", "síntesis reanudada"])
-            b = StubAdapter("gemini", ["B1 [CONVERGENCIA: SÍ]"])
+            a = StubAdapter("claude", ['A1 {"convergencia": true}', "síntesis reanudada"])
+            b = StubAdapter("gemini", ['B1 {"convergencia": true}'])
             fabrica.a = a
             return a, b
 
         nombre = self._guardar_parcial(tmp_path)
         app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             r = c.post("/api/debates", json={
                 "agentes": ["claude-cli", "gemini-api"], "resume": nombre, "rounds": 1,
             })
@@ -320,6 +356,7 @@ class TestRamas:
         self._rama_con_commit(git_repo, "devvating/uno", "a.py")
         app = crear_app(repo=str(git_repo))
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             data = c.get("/api/ramas").json()
         assert data["actual"] == "main"
         nombres = [r["nombre"] for r in data["ramas"]]
@@ -330,6 +367,7 @@ class TestRamas:
         self._rama_con_commit(git_repo, "devvating/uno", "a.py")
         app = crear_app(repo=str(git_repo))
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             assert c.post("/api/ramas/borrar", json={"rama": "devvating/uno"}).status_code == 200
             nombres = [r["nombre"] for r in c.get("/api/ramas").json()["ramas"]]
             assert "devvating/uno" not in nombres
@@ -337,6 +375,7 @@ class TestRamas:
     def test_no_borra_ramas_ajenas(self, git_repo):
         app = crear_app(repo=str(git_repo))
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             assert c.post("/api/ramas/borrar", json={"rama": "main"}).status_code == 422
             assert c.post("/api/ramas/borrar",
                           json={"rama": "feature/x"}).status_code == 422
@@ -346,6 +385,7 @@ class TestRamas:
         gitutil.create_branch(str(git_repo), "devvating/actual")  # quedamos en ella
         app = crear_app(repo=str(git_repo))
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             assert c.post("/api/ramas/borrar",
                           json={"rama": "devvating/actual"}).status_code == 409
 
@@ -400,6 +440,7 @@ class TestEjecucion:
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
                         backend_ejecucion=_BackendEscritor())
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             self._debatir(c)
             nombre = c.get("/api/transcripts").json()["transcripts"][0]
             with c.websocket_connect("/ws") as ws:
@@ -437,6 +478,7 @@ class TestEjecucion:
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
                         backend_ejecucion=_BackendEscritor())
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             fin = self._ejecutar_hasta_fin(c)
             r = c.post("/api/commit", json={"mensaje": "feat: cambios del debate"})
             assert r.status_code == 200 and r.json()["sha"]
@@ -451,6 +493,7 @@ class TestEjecucion:
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
                         backend_ejecucion=_BackendEscritor())
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             self._ejecutar_hasta_fin(c)
             assert c.post("/api/commit", json={"mensaje": "  "}).status_code == 422
 
@@ -460,6 +503,7 @@ class TestEjecucion:
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
                         backend_ejecucion=_BackendEscritor())
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             self._ejecutar_hasta_fin(c)
             assert c.post("/api/descartar").status_code == 200
             assert c.post("/api/descartar").status_code == 409  # ya no hay nada
@@ -469,6 +513,7 @@ class TestEjecucion:
     def test_commit_sin_ejecucion_es_409(self, git_repo):
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             assert c.post("/api/commit", json={"mensaje": "x"}).status_code == 409
 
     def test_ejecutar_ignora_el_repo_del_cuerpo(self, git_repo, tmp_path):
@@ -480,6 +525,7 @@ class TestEjecucion:
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
                         backend_ejecucion=_BackendEscritor())
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             self._debatir(c)
             nombre = c.get("/api/transcripts").json()["transcripts"][0]
             with c.websocket_connect("/ws") as ws:
@@ -503,6 +549,7 @@ class TestEjecucion:
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
                         backend_ejecucion=_BackendFallido())
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             fin = self._ejecutar_hasta_fin(c)
             assert fin["returncode"] == 1  # el fallo viaja en el evento
             r = c.post("/api/commit", json={"mensaje": "no debería"})
@@ -516,6 +563,7 @@ class TestEjecucion:
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
                         backend_ejecucion=_BackendEscritor())
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             self._debatir(c)
             nombre = c.get("/api/transcripts").json()["transcripts"][0]
             with c.websocket_connect("/ws") as ws:
@@ -536,5 +584,6 @@ class TestEjecucion:
         (carpeta / "vacio.json").write_text(_json.dumps({"synthesis": ""}), encoding="utf-8")
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
         with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             r = c.post("/api/ejecutar", json={"transcript": "vacio.json"})
             assert r.status_code == 422

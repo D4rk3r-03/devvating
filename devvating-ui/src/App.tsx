@@ -77,6 +77,9 @@ export default function App() {
   const [roster, setRoster] = useState<string[]>([]);
   const [alias, setAlias] = useState<Record<string, string>>({});
   const [sesgosDisp, setSesgosDisp] = useState<string[]>([]);
+  // Token anti-CSRF (paso 0, auto-auditoría): lo entrega /api/roster al montar
+  // y viaja en cada POST mutante; sin este header el Hub responde 403.
+  const [csrfToken, setCsrfToken] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [corriendo, setCorriendo] = useState(false);
   const [transcripts, setTranscripts] = useState<string[]>([]);
@@ -105,6 +108,14 @@ export default function App() {
     [parA, parB, alias],
   );
 
+  // POST mutante con el token CSRF adjunto (ver _requiere_csrf en hub.py).
+  const post = (url: string, body?: unknown) =>
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Devvating-CSRF": csrfToken },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+
   const cargarTranscripts = () =>
     fetch("/api/transcripts").then((r) => r.json())
       .then((d) => setTranscripts(d.transcripts));
@@ -115,11 +126,7 @@ export default function App() {
   const borrarRama = async (nombre: string) => {
     if (!window.confirm(`¿Borrar la rama ${nombre}? Se pierde lo que no hayas fusionado.`))
       return;
-    const r = await fetch("/api/ramas/borrar", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rama: nombre }),
-    });
+    const r = await post("/api/ramas/borrar", { rama: nombre });
     if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo borrar la rama.");
     cargarRamas();
   };
@@ -127,6 +134,7 @@ export default function App() {
   useEffect(() => {
     fetch("/api/roster").then((r) => r.json()).then((d) => {
       setRoster(d.agentes); setAlias(d.alias); setSesgosDisp(d.sesgos ?? []);
+      setCsrfToken(d.csrf_token ?? "");
     });
     cargarTranscripts();
     cargarRamas();
@@ -226,39 +234,27 @@ export default function App() {
 
   const lanzar = async () => {
     setAviso("");
-    const r = await fetch("/api/debates", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tema, files, rounds, profundo, interactivo, agentes: [parA, parB],
-        sesgos: esAutodebate ? [sesgoA, sesgoB] : [],
-      }),
+    const r = await post("/api/debates", {
+      tema, files, rounds, profundo, interactivo, agentes: [parA, parB],
+      sesgos: esAutodebate ? [sesgoA, sesgoB] : [],
     });
     if (r.ok) setCorriendo(true);
     else setAviso((await r.json()).detail ?? "No se pudo lanzar el debate.");
   };
 
   const cancelarDebate = async () => {
-    const r = await fetch("/api/debates/cancelar", { method: "POST" });
+    const r = await post("/api/debates/cancelar");
     if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo cancelar el debate.");
   };
 
   const enviarNota = async (texto: string) => {
-    await fetch("/api/intervencion", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nota: texto }),
-    });
+    await post("/api/intervencion", { nota: texto });
     setNota("");
   };
 
   const ejecutarPlan = async (transcript: string) => {
     setEjecutando(true);
-    const r = await fetch("/api/ejecutar", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transcript }),
-    });
+    const r = await post("/api/ejecutar", { transcript });
     if (!r.ok) {
       setEjecutando(false);
       setAviso((await r.json()).detail ?? "No se pudo lanzar la ejecución.");
@@ -266,29 +262,21 @@ export default function App() {
   };
 
   const commitear = async () => {
-    const r = await fetch("/api/commit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mensaje: commitMsg }),
-    });
+    const r = await post("/api/commit", { mensaje: commitMsg });
     if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo commitear.");
     else setCommitMsg("");
   };
 
   const descartar = async () => {
-    const r = await fetch("/api/descartar", { method: "POST" });
+    const r = await post("/api/descartar");
     if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo descartar.");
   };
 
   const reanudar = async (parcial: string) => {
     setAviso("");
-    const r = await fetch("/api/debates", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        agentes: [parA, parB], rounds, resume: parcial,
-        sesgos: esAutodebate ? [sesgoA, sesgoB] : [],
-      }),
+    const r = await post("/api/debates", {
+      agentes: [parA, parB], rounds, resume: parcial,
+      sesgos: esAutodebate ? [sesgoA, sesgoB] : [],
     });
     if (r.ok) setCorriendo(true);
     else setAviso((await r.json()).detail ?? "No se pudo reanudar el debate.");

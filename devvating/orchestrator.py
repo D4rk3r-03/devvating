@@ -53,16 +53,23 @@ class DebateCancelledError(RuntimeError):
         super().__init__("Debate cancelado por el vocero.")
         self.session = session
 
-_VERDICT_RE = re.compile(r"\[\s*CONVERGENCIA\s*:\s*(S[IÍ]|NO)\s*\]", re.IGNORECASE)
+# Bloque JSON final en vez de una marca de texto libre (`[CONVERGENCIA: SÍ/NO]`):
+# con 6 CLIs de terceros en el roster no se controla su formato de salida, y un
+# booleano JSON es más robusto de extraer que una marca ad-hoc. Si no aparece o
+# no se puede leer, el fallback es el mismo de siempre: sin veredicto (None), lo
+# que el llamador trata como "no convergió" — nunca rompe el debate.
+_VERDICT_JSON_RE = re.compile(
+    r'\{\s*"convergencia"\s*:\s*(true|false)\s*\}', re.IGNORECASE
+)
 
 
 def _parse_verdict(text: str) -> tuple[str, str | None]:
     """Extrae el veredicto de convergencia y lo quita del texto mostrado."""
-    match = _VERDICT_RE.search(text)
+    match = _VERDICT_JSON_RE.search(text)
     if not match:
         return text.strip(), None
-    verdict = "si" if match.group(1).upper() in ("SI", "SÍ") else "no"
-    clean = _VERDICT_RE.sub("", text).strip()
+    verdict = "si" if match.group(1).lower() == "true" else "no"
+    clean = _VERDICT_JSON_RE.sub("", text).strip()
     return clean, verdict
 
 

@@ -42,6 +42,15 @@ class ExecutionOutcome:
     allow_commands: bool = False
     # Rama previa a crear la de ejecución: a dónde volver si el vocero descarta.
     base_branch: str = ""
+    # Fase 5 (M9) — verificación tras aplicar el plan. verify_command vacío =
+    # no se pidió verificación (comportamiento clásico, sin cambios).
+    verify_command: str = ""
+    verify_returncode: int | None = None
+    verify_output: str = ""
+    # True si el comando falló y se intentó UNA corrección acotada (1
+    # iteración del mismo backend, con la salida del fallo como contexto).
+    # verify_returncode/verify_output quedan con el resultado tras corregir.
+    verify_corrected: bool = False
 
 
 EventCb = Callable[[str, str], None]
@@ -53,6 +62,18 @@ def _exec_prompt(plan: ExecutionPlan) -> str:
         "los cambios que describe el plan; no añadas mejoras ni refactors extra. "
         "Si algo del plan es ambiguo, elige la interpretación más conservadora.\n\n"
         f"PLAN:\n{plan.text}"
+    )
+
+
+def _correction_prompt(plan: ExecutionPlan, verify_command: str, verify_output: str) -> str:
+    return (
+        "El plan que acabas de aplicar en este repositorio NO pasó la "
+        "verificación del proyecto. Corrige el código para que la verificación "
+        "pase, sin desviarte del plan original ni añadir cambios fuera de su "
+        "alcance.\n\n"
+        f"PLAN ORIGINAL:\n{plan.text}\n\n"
+        f"COMANDO DE VERIFICACIÓN: {verify_command}\n\n"
+        f"SALIDA DEL FALLO:\n{verify_output}"
     )
 
 
@@ -128,6 +149,7 @@ class Executor:
         allow_commands: bool = False,
         branch: str | None = None,
         require_clean: bool = True,
+        verify_command: str | None = None,
     ) -> ExecutionOutcome:
         if not gitutil.is_git_repo(self.repo):
             raise ExecutorError(
@@ -152,6 +174,32 @@ class Executor:
         changed = gitutil.staged_changed_files(self.repo)
         self._on_event("diff_listo", str(len(changed)))
 
+        verify_returncode: int | None = None
+        verify_output = ""
+        verify_corrected = False
+        if verify_command:
+            self._on_event("verificando", verify_command)
+            verify_returncode, verify_output = self._run_verify(verify_command)
+            if verify_returncode != 0:
+                self._on_event("verificacion_fallida", str(verify_returncode))
+                # Mini-ronda de corrección acotada: UNA sola iteración, mismo
+                # ejecutor, con la salida del fallo como contexto. No se
+                # reintenta más allá de esto — el reporte honesto es el punto.
+                self._on_event("corrigiendo", self.backend.name)
+                self.backend.run(
+                    _correction_prompt(plan, verify_command, verify_output),
+                    self.repo,
+                    allow_commands,
+                )
+                verify_corrected = True
+                gitutil.stage_all(self.repo)
+                diff = gitutil.staged_diff(self.repo)
+                changed = gitutil.staged_changed_files(self.repo)
+                verify_returncode, verify_output = self._run_verify(verify_command)
+                self._on_event("verificacion_reintentada", str(verify_returncode))
+            else:
+                self._on_event("verificacion_ok", "")
+
         return ExecutionOutcome(
             branch=branch,
             backend=self.backend.name,
@@ -161,4 +209,14 @@ class Executor:
             changed_files=changed,
             allow_commands=allow_commands,
             base_branch=base_branch,
+            verify_command=verify_command or "",
+            verify_returncode=verify_returncode,
+            verify_output=verify_output,
+            verify_corrected=verify_corrected,
         )
+
+    def _run_verify(self, command: str) -> tuple[int, str]:
+        proc = subprocess.run(
+            command, shell=True, cwd=self.repo, capture_output=True, text=True
+        )
+        return proc.returncode, proc.stdout + proc.stderr

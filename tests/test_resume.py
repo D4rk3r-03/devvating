@@ -31,8 +31,8 @@ def _parcial_hasta_ronda_1() -> DebateSession:
 class TestResumeEnOrquestador:
     def test_no_repite_turnos_pagados_y_continua_donde_quedo(self):
         # Solo se programan los turnos que FALTAN: réplicas r2 + síntesis.
-        a = StubAdapter("claude", ["A2 [CONVERGENCIA: SÍ]", "síntesis"])
-        b = StubAdapter("gemini", ["B2 [CONVERGENCIA: SÍ]"])
+        a = StubAdapter("claude", ['A2 {"convergencia": true}', "síntesis"])
+        b = StubAdapter("gemini", ['B2 {"convergencia": true}'])
         orch = Orchestrator(a, b, repo_root=".", sleep=lambda _: None)
         s = orch.run(TOPIC, max_rounds=2, old_session=_parcial_hasta_ronda_1())
 
@@ -45,8 +45,8 @@ class TestResumeEnOrquestador:
         ]
 
     def test_las_replicas_nuevas_ven_las_posturas_cacheadas(self):
-        a = StubAdapter("claude", ["A2 [CONVERGENCIA: SÍ]", "síntesis"])
-        b = StubAdapter("gemini", ["B2 [CONVERGENCIA: SÍ]"])
+        a = StubAdapter("claude", ['A2 {"convergencia": true}', "síntesis"])
+        b = StubAdapter("gemini", ['B2 {"convergencia": true}'])
         orch = Orchestrator(a, b, repo_root=".", sleep=lambda _: None)
         orch.run(TOPIC, max_rounds=2, old_session=_parcial_hasta_ronda_1())
         # La primera llamada real de 'a' es su réplica de r2: debe traer la
@@ -57,15 +57,15 @@ class TestResumeEnOrquestador:
         parcial = _parcial_hasta_ronda_1()
         parcial.turns.append(Turn(2, "replica", "claude", "A2-viejo", "si"))
         a = StubAdapter("claude", ["síntesis"])  # su r2 ya está pagada
-        b = StubAdapter("gemini", ["B2 [CONVERGENCIA: SÍ]"])
+        b = StubAdapter("gemini", ['B2 {"convergencia": true}'])
         orch = Orchestrator(a, b, repo_root=".", sleep=lambda _: None)
         s = orch.run(TOPIC, max_rounds=2, old_session=parcial)
         assert len(b.llamadas) == 1 and len(a.llamadas) == 1  # solo lo faltante
         assert s.converged  # el veredicto cacheado 'si' de a cuenta
 
     def test_sin_old_session_el_flujo_es_el_de_siempre(self):
-        a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"])
-        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+        a = StubAdapter("claude", ["A0", 'A1 {"convergencia": true}', "síntesis"])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
         s = Orchestrator(a, b, repo_root=".").run(TOPIC, max_rounds=1)
         assert len(a.llamadas) == 3 and s.converged
 

@@ -56,7 +56,7 @@ class TestTotalizacionEnDebate:
         # Apertura + 1 réplica + síntesis (a sintetiza): a=3 turnos, b=2.
         a = StubAdapter(
             "claude",
-            ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"],
+            ["A0", 'A1 {"convergencia": true}', "síntesis"],
             usages=[
                 TurnUsage(100, 10, cost_usd=0.01),
                 TurnUsage(200, 20, cost_usd=0.02),
@@ -65,7 +65,7 @@ class TestTotalizacionEnDebate:
         )
         b = StubAdapter(
             "gemini",
-            ["B0", "B1 [CONVERGENCIA: SÍ]"],
+            ["B0", 'B1 {"convergencia": true}'],
             usages=[TurnUsage(50, 5), TurnUsage(60, 6)],  # sin costo (tarifa desconocida)
         )
         orch = Orchestrator(a, b, repo_root=".")
@@ -89,8 +89,8 @@ class TestTotalizacionEnDebate:
         assert total.cost_usd == pytest.approx(0.06)
 
     def test_agentes_sin_metricas_no_generan_totales_fantasma(self):
-        a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
-        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+        a = StubAdapter("claude", ["A0", 'A1 {"convergencia": true}', "s"])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
         s = Orchestrator(a, b, repo_root=".").run(
             DebateTopic(prompt="t"), max_rounds=1
         )

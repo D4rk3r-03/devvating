@@ -38,6 +38,11 @@ class ProjectConfig:
     # Inclinación por agente para romper el eco de un auto-debate (nombres de
     # perfil de roles.SESGOS, p. ej. ["audaz", "cauto"]). Vacío = sin sesgo.
     sesgos: list[str] = field(default_factory=list)
+    # M9 — comando de verificación de fase 5 (p. ej. "pytest -q"), corrido tras
+    # aplicar el plan. Viaja en el repo objetivo, así que NUNCA se corre solo
+    # por estar aquí: exige opt-in explícito del vocero en cada ejecución
+    # (mismo régimen que --allow-commands, protocolo 5) — ver ejecutar.py.
+    verificacion: str = ""
 
     @classmethod
     def load(cls, start: str = ".") -> "ProjectConfig":
@@ -62,6 +67,7 @@ class ProjectConfig:
                 gemini_backend=_backend(backends.get("gemini", "api")),
                 agentes=agentes,
                 sesgos=sesgos,
+                verificacion=str(data.get("verificacion", "")),
             )
         except (OSError, ValueError, TypeError, AttributeError):
             return cls()

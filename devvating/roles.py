@@ -16,9 +16,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .orchestrator import DebateTopic
 
-# Marca de veredicto que la RÉPLICA debe emitir en su última línea.
-VERDICT_SI = "[CONVERGENCIA: SÍ]"
-VERDICT_NO = "[CONVERGENCIA: NO]"
+# Bloque JSON de veredicto que la RÉPLICA debe emitir en su última línea. JSON
+# en vez de una marca de texto libre porque con 6 CLIs de terceros en el
+# roster no se controla su formato de salida; un booleano JSON es más robusto
+# de extraer (orchestrator._parse_verdict) que una marca ad-hoc.
+VERDICT_SI = '{"convergencia": true}'
+VERDICT_NO = '{"convergencia": false}'
 
 # --- Sesgos de agente (inclinaciones para inducir divergencia) ----------------
 # Dos instancias del MISMO modelo convergen en falso (eco): comparten pesos y
@@ -108,8 +111,9 @@ REPLICA = (
     "Ancla en el código real con read_file cuando aplique. Responde en español, "
     "~200 palabras.\n\n"
     "OBLIGATORIO: termina tu mensaje con una última línea que sea EXACTAMENTE "
-    f"'{VERDICT_SI}' si ya coincides con la postura del otro y no tienes "
-    f"objeciones nuevas, o '{VERDICT_NO}' si mantienes algún desacuerdo."
+    f"el bloque JSON {VERDICT_SI} si ya coincides con la postura del otro y no "
+    f"tienes objeciones nuevas, o {VERDICT_NO} si mantienes algún desacuerdo. "
+    "No pongas nada más en esa línea aparte del JSON."
 )
 
 INVERSION = (

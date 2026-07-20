@@ -7,9 +7,15 @@ backend cli). Ver DISENO.md, hito M0 y decisión D5.
 
 Uso:
     devvating pruebavida [archivo] [--claude-backend api|cli] [--gemini-backend api|cli]
+    devvating pruebavida --agentes antigravity,kimi   # agentes puntuales del roster
+    devvating pruebavida --roster-cli                 # smoke test: TODOS los adaptadores CLI
 
 El backend api requiere la clave correspondiente en el entorno o en .env;
 el backend cli requiere el CLI del agente instalado y con sesión iniciada.
+
+`--roster-cli` es el smoke test documentado contra roturas de flags/formatos
+de los CLIs de terceros (claude-cli, gemini-cli, antigravity, kimi): cada uno
+trae su propio binario que puede cambiar de versión sin aviso.
 """
 
 from __future__ import annotations
@@ -36,6 +42,17 @@ def build_registry(cfg: Config) -> ToolRegistry:
     return registry
 
 
+def _elegir_objetivos(
+    args: argparse.Namespace, roster_nombres: list[str], claude_backend: str, gemini_backend: str
+) -> list[str]:
+    """Resuelve qué agentes probar: --agentes > --roster-cli > par por defecto."""
+    if args.agentes:
+        return [n.strip() for n in args.agentes.split(",") if n.strip()]
+    if args.roster_cli:
+        return [n for n in roster_nombres if not n.endswith("-api")]
+    return [f"claude-{claude_backend}", f"gemini-{gemini_backend}"]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="devvating pruebavida", description="Prueba de vida de los adaptadores."
@@ -46,6 +63,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--agentes", default=None,
         help="Agentes del roster a probar, separados por coma (D7). Ej: antigravity,kimi",
+    )
+    parser.add_argument(
+        "--roster-cli", action="store_true",
+        help="Prueba TODOS los adaptadores CLI del roster (claude-cli, gemini-cli, "
+             "antigravity, kimi): smoke test documentado contra roturas de flags/"
+             "formatos de los CLIs de terceros. Ignora --agentes y los --*-backend.",
     )
     args = parser.parse_args(argv)
 
@@ -65,10 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     # Import aquí para evitar coste al ayudar (--help) y mantener el módulo liviano.
     from . import agentes as banco
 
-    if args.agentes:
-        objetivos = [n.strip() for n in args.agentes.split(",") if n.strip()]
-    else:
-        objetivos = [f"claude-{claude_backend}", f"gemini-{gemini_backend}"]
+    objetivos = _elegir_objetivos(args, banco.nombres(), claude_backend, gemini_backend)
 
     for nombre in objetivos:
         console.rule(f"[bold]{nombre}")

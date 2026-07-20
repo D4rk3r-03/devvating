@@ -61,6 +61,64 @@ class TestExecutor:
         assert gitutil.staged_changed_files(str(git_repo))
 
 
+class VerifyBackend:
+    """Backend stub: la 2ª llamada (corrección) arregla el archivo si `corrige`."""
+
+    name = "stub-verify"
+
+    def __init__(self, corrige: bool = True) -> None:
+        self.llamadas = 0
+        self.corrige = corrige
+
+    def run(self, prompt: str, cwd: str, allow_commands: bool) -> tuple[int, str]:
+        import pathlib
+
+        self.llamadas += 1
+        p = pathlib.Path(cwd)
+        (p / "hola.txt").write_text("hola\nmundo\n", encoding="utf-8")
+        if self.llamadas >= 2 and self.corrige:
+            (p / "arreglado.txt").write_text("ok\n", encoding="utf-8")
+        return 0, "ok"
+
+
+class TestVerificacion:
+    """Fase 5 (M9): comando de verificación opcional tras aplicar el plan."""
+
+    def test_sin_verify_command_no_verifica(self, git_repo):
+        backend = VerifyBackend()
+        out = Executor(str(git_repo), backend).execute(PLAN)
+        assert out.verify_command == "" and out.verify_returncode is None
+        assert not out.verify_corrected and backend.llamadas == 1
+
+    def test_verificacion_pasa_sin_correccion(self, git_repo):
+        backend = VerifyBackend()
+        out = Executor(str(git_repo), backend).execute(
+            PLAN, verify_command="test -f hola.txt"
+        )
+        assert out.verify_command == "test -f hola.txt"
+        assert out.verify_returncode == 0 and not out.verify_corrected
+        assert backend.llamadas == 1  # sin corrección: una sola pasada
+
+    def test_verificacion_falla_dispara_una_correccion_que_arregla(self, git_repo):
+        backend = VerifyBackend(corrige=True)
+        out = Executor(str(git_repo), backend).execute(
+            PLAN, verify_command="test -f arreglado.txt"
+        )
+        assert out.verify_corrected
+        assert backend.llamadas == 2  # ejecución original + 1 corrección
+        assert out.verify_returncode == 0  # la corrección sí arregló
+        assert "arreglado.txt" in out.changed_files  # el diff refleja la corrección
+
+    def test_correccion_que_no_arregla_reporta_el_fallo_honestamente(self, git_repo):
+        backend = VerifyBackend(corrige=False)
+        out = Executor(str(git_repo), backend).execute(
+            PLAN, verify_command="test -f arreglado.txt"
+        )
+        assert out.verify_corrected
+        assert backend.llamadas == 2  # tope de 1 corrección: no reintenta más
+        assert out.verify_returncode != 0  # honesto: sigue fallando
+
+
 class TestClaudeCodeBackendArgv:
     def test_sin_comandos_limita_herramientas_a_edicion(self):
         argv = ClaudeCodeBackend().build_argv("plan", allow_commands=False)

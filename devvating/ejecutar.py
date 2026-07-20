@@ -28,6 +28,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
 
+from .appconfig import ProjectConfig
 from .executor import ClaudeCodeBackend, Executor, ExecutionPlan, ExecutorError
 
 
@@ -64,6 +65,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Permite ejecutar comandos (Bash). Salta permisos — PELIGROSO.",
     )
     parser.add_argument("--yes", action="store_true", help="Omite la confirmación.")
+    parser.add_argument(
+        "--verificar",
+        action="store_true",
+        help="Fase 5 (M9): tras aplicar el plan, corre el comando de "
+             "'verificacion' de .devvating.json; si falla, intenta UNA "
+             "corrección acotada y reporta el resultado. El comando viene del "
+             "repo objetivo: exige confirmación aparte de --yes — PELIGROSO.",
+    )
     args = parser.parse_args(argv)
 
     console = Console()
@@ -93,6 +102,37 @@ def main(argv: list[str] | None = None) -> int:
             console.print("Cancelado por el vocero.")
             return 0
 
+    # M9 — verificación (fase 5): comando configurado en el REPO OBJETIVO, así
+    # que --verificar por sí solo no basta — exige confirmación explícita y
+    # aparte de --yes (mismo régimen que --allow-commands, protocolo 5). Un
+    # repo hostil no puede disparar ejecución remota disfrazada de config.
+    verify_command: str | None = None
+    if args.verificar:
+        pc = ProjectConfig.load(args.repo)
+        if not pc.verificacion:
+            console.print(
+                "[yellow]--verificar activado, pero '.devvating.json' no trae "
+                "'verificacion'; se omite.[/yellow]"
+            )
+        else:
+            console.print(Panel(
+                pc.verificacion, title="[bold red]Comando de verificación (.devvating.json)",
+                border_style="red",
+            ))
+            console.print(
+                "[bold red]⚠ Viene del repositorio objetivo y se correrá tal "
+                "cual tras aplicar el plan (y tras la corrección, si falla). "
+                "Revísalo con cuidado.[/bold red]"
+            )
+            resp = console.input(
+                "[bold yellow]Vocero[/bold yellow] · ¿Confirmas correr este "
+                "comando de verificación? (y/N): "
+            ).strip().lower()
+            if resp in ("y", "s", "yes", "si", "sí"):
+                verify_command = pc.verificacion
+            else:
+                console.print("Verificación omitida por el vocero.")
+
     backend = ClaudeCodeBackend(model=args.model)
     executor = Executor(
         args.repo,
@@ -102,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         outcome = executor.execute(
-            plan, allow_commands=args.allow_commands, branch=args.branch
+            plan, allow_commands=args.allow_commands, branch=args.branch,
+            verify_command=verify_command,
         )
     except ExecutorError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -120,6 +161,25 @@ def main(argv: list[str] | None = None) -> int:
             console.print(f"  • {f}")
         console.print("\n[bold]Diff:[/bold]")
         console.print(Syntax(outcome.diff, "diff", theme="ansi_dark", word_wrap=True))
+
+    if outcome.verify_command:
+        console.rule("[bold]Verificación (fase 5)")
+        if outcome.verify_corrected:
+            console.print(
+                "[yellow]Falló en el primer intento; se corrió UNA corrección "
+                "acotada.[/yellow]"
+            )
+        if outcome.verify_returncode == 0:
+            console.print("[green]✓ Verificación OK.[/green]")
+        else:
+            console.print(
+                f"[red]✗ Verificación sigue fallando (código "
+                f"{outcome.verify_returncode}). Reporte honesto: el plan no "
+                "quedó verde.[/red]"
+            )
+            console.print(Syntax(
+                outcome.verify_output, "text", theme="ansi_dark", word_wrap=True
+            ))
 
     console.print(
         f"\n[bold]Vocero:[/bold] revisa el diff en la rama [cyan]{outcome.branch}[/cyan]. "

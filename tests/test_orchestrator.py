@@ -19,17 +19,24 @@ TOPIC = DebateTopic(prompt="¿Refactor X?", context_hint="a.py")
 
 
 class TestParseVerdict:
-    def test_extrae_si_con_y_sin_acento(self):
-        assert _parse_verdict("texto [CONVERGENCIA: SÍ]")[1] == "si"
-        assert _parse_verdict("texto [convergencia: si]")[1] == "si"
+    def test_extrae_si(self):
+        assert _parse_verdict('texto {"convergencia": true}')[1] == "si"
 
     def test_extrae_no_y_limpia_el_texto(self):
-        clean, verdict = _parse_verdict("postura firme\n[CONVERGENCIA: NO]")
+        clean, verdict = _parse_verdict('postura firme\n{"convergencia": false}')
         assert verdict == "no"
-        assert "[CONVERGENCIA" not in clean and clean == "postura firme"
+        assert '"convergencia"' not in clean and clean == "postura firme"
+
+    def test_tolera_espacios_y_mayusculas_en_el_booleano(self):
+        assert _parse_verdict('texto { "convergencia" :  TRUE }')[1] == "si"
 
     def test_sin_marca_devuelve_none(self):
         assert _parse_verdict("sin veredicto")[1] is None
+
+    def test_marca_vieja_de_corchetes_ya_no_se_reconoce(self):
+        # Fallback seguro: un bloque mal formado o el formato viejo no cuentan
+        # como convergencia — el debate sigue de largo en vez de romper.
+        assert _parse_verdict("texto [CONVERGENCIA: SÍ]")[1] is None
 
 
 def _run(a_resp, b_resp, **kwargs):
@@ -43,8 +50,8 @@ def _run(a_resp, b_resp, **kwargs):
 class TestFlujo:
     def test_apertura_a_ciegas_no_expone_la_postura_del_otro(self):
         a, b, _ = _run(
-            ["postura A", "réplica A [CONVERGENCIA: SÍ]", "síntesis"],
-            ["postura B", "réplica B [CONVERGENCIA: SÍ]"],
+            ["postura A", 'réplica A {"convergencia": true}', "síntesis"],
+            ["postura B", 'réplica B {"convergencia": true}'],
             max_rounds=1,
         )
         # En el primer prompt de cada agente no aparece la propuesta ajena.
@@ -56,24 +63,24 @@ class TestFlujo:
 
     def test_corte_temprano_si_ambos_convergen(self):
         _, _, s = _run(
-            ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"],
-            ["B0", "B1 [CONVERGENCIA: SÍ]"],
+            ["A0", 'A1 {"convergencia": true}', "síntesis"],
+            ["B0", 'B1 {"convergencia": true}'],
             max_rounds=3,
         )
         assert s.converged and s.converged_round == 1 and s.rounds_run == 1
 
     def test_sin_consenso_agota_las_rondas(self):
         _, _, s = _run(
-            ["A0", "A1 [CONVERGENCIA: NO]", "A2 [CONVERGENCIA: NO]", "síntesis"],
-            ["B0", "B1 [CONVERGENCIA: SÍ]", "B2 [CONVERGENCIA: SÍ]"],
+            ["A0", 'A1 {"convergencia": false}', 'A2 {"convergencia": false}', "síntesis"],
+            ["B0", 'B1 {"convergencia": true}', 'B2 {"convergencia": true}'],
             max_rounds=2,
         )
         assert not s.converged and s.rounds_run == 2
 
     def test_sintesis_rotativa_por_indice(self):
         _, b, s = _run(
-            ["A0", "A1 [CONVERGENCIA: SÍ]"],
-            ["B0", "B1 [CONVERGENCIA: SÍ]", "síntesis de B"],
+            ["A0", 'A1 {"convergencia": true}'],
+            ["B0", 'B1 {"convergencia": true}', "síntesis de B"],
             max_rounds=1,
             synthesizer_index=1,
         )
@@ -84,10 +91,10 @@ class TestFlujo:
     def test_intervencion_del_vocero_llega_en_la_ronda_correcta(self):
         notas = {2: "ojo con el rendimiento"}
         a = StubAdapter(
-            "claude", ["A0", "A1 [CONVERGENCIA: NO]", "A2 [CONVERGENCIA: SÍ]", "síntesis"]
+            "claude", ["A0", 'A1 {"convergencia": false}', 'A2 {"convergencia": true}', "síntesis"]
         )
         b = StubAdapter(
-            "gemini", ["B0", "B1 [CONVERGENCIA: NO]", "B2 [CONVERGENCIA: SÍ]"]
+            "gemini", ["B0", 'B1 {"convergencia": false}', 'B2 {"convergencia": true}']
         )
         orch = Orchestrator(a, b, repo_root=".")
         orch.run(TOPIC, max_rounds=2, on_intervention=lambda r: notas.get(r))
@@ -98,8 +105,8 @@ class TestFlujo:
 
     def test_modo_profundo_agrega_ronda_de_inversion(self):
         _, _, s = _run(
-            ["A0", "A1 [CONVERGENCIA: SÍ]", "steelman A", "síntesis"],
-            ["B0", "B1 [CONVERGENCIA: SÍ]", "steelman B"],
+            ["A0", 'A1 {"convergencia": true}', "steelman A", "síntesis"],
+            ["B0", 'B1 {"convergencia": true}', "steelman B"],
             max_rounds=1,
             deep_mode=True,
         )
@@ -108,8 +115,8 @@ class TestFlujo:
 
     def test_turnos_serializables_y_ordenados(self):
         _, _, s = _run(
-            ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"],
-            ["B0", "B1 [CONVERGENCIA: SÍ]"],
+            ["A0", 'A1 {"convergencia": true}', "síntesis"],
+            ["B0", 'B1 {"convergencia": true}'],
             max_rounds=1,
         )
         assert [t.phase for t in s.turns] == [
@@ -132,8 +139,8 @@ class TestConSesgo:
 class TestSesgos:
     def test_sesgo_en_propuesta_y_replica_no_en_sintesis(self):
         # El sesgo colorea propuesta y réplica; la síntesis debe ser neutral.
-        a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"])
-        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+        a = StubAdapter("claude", ["A0", 'A1 {"convergencia": true}', "síntesis"])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
         orch = Orchestrator(a, b, repo_root=".", biases=["SESGO_A", "SESGO_B"])
         orch.run(TOPIC, max_rounds=1, synthesizer_index=0)
         assert "SESGO_A" in a.llamadas[0][0]      # propuesta
@@ -143,8 +150,8 @@ class TestSesgos:
 
     def test_inversion_no_recibe_sesgo(self):
         # La inversión (steelman) ya invierte por diseño: no debe llevar sesgo.
-        a = StubAdapter("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "steelman A", "síntesis"])
-        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]", "steelman B"])
+        a = StubAdapter("claude", ["A0", 'A1 {"convergencia": true}', "steelman A", "síntesis"])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}', "steelman B"])
         orch = Orchestrator(a, b, repo_root=".", biases=["SESGO_A", "SESGO_B"])
         orch.run(TOPIC, max_rounds=1, deep_mode=True, synthesizer_index=0)
         # a: 0 propuesta, 1 réplica, 2 inversión, 3 síntesis.
@@ -152,8 +159,8 @@ class TestSesgos:
 
     def test_sin_sesgo_es_comportamiento_clasico(self):
         a, _, _ = _run(
-            ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"],
-            ["B0", "B1 [CONVERGENCIA: SÍ]"],
+            ["A0", 'A1 {"convergencia": true}', "síntesis"],
+            ["B0", 'B1 {"convergencia": true}'],
             max_rounds=1,
         )
         assert a.llamadas[0][0] == roles.PROPONENTE  # rol puro, sin añadidos
@@ -169,8 +176,8 @@ class TestMinRounds:
         # Ambos declaran SÍ en la ronda 1, pero min_rounds=2 (auto-debate)
         # obliga a seguir: el eco no puede cerrar el debate en la primera réplica.
         _, _, s = _run(
-            ["A0", "A1 [CONVERGENCIA: SÍ]", "A2 [CONVERGENCIA: SÍ]", "síntesis"],
-            ["B0", "B1 [CONVERGENCIA: SÍ]", "B2 [CONVERGENCIA: SÍ]"],
+            ["A0", 'A1 {"convergencia": true}', 'A2 {"convergencia": true}', "síntesis"],
+            ["B0", 'B1 {"convergencia": true}', 'B2 {"convergencia": true}'],
             max_rounds=2,
             min_rounds=2,
         )
@@ -179,8 +186,8 @@ class TestMinRounds:
     def test_default_permite_corte_en_ronda_1(self):
         # min_rounds=1 (default, debate clásico): la convergencia en ronda 1 vale.
         _, _, s = _run(
-            ["A0", "A1 [CONVERGENCIA: SÍ]", "síntesis"],
-            ["B0", "B1 [CONVERGENCIA: SÍ]"],
+            ["A0", 'A1 {"convergencia": true}', "síntesis"],
+            ["B0", 'B1 {"convergencia": true}'],
             max_rounds=3,
         )
         assert s.converged and s.converged_round == 1
@@ -207,8 +214,8 @@ class TestCancelacion:
                 ev.set()  # el orquestador lo ve antes del siguiente turno
                 return out
 
-        a = CancelaTrasResponder("claude", ["A0", "A1 [CONVERGENCIA: SÍ]", "s"])
-        b = StubAdapter("gemini", ["B0", "B1 [CONVERGENCIA: SÍ]"])
+        a = CancelaTrasResponder("claude", ["A0", 'A1 {"convergencia": true}', "s"])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
         orch = Orchestrator(a, b, repo_root=".")
         with pytest.raises(DebateCancelledError) as ei:
             orch.run(TOPIC, max_rounds=1, cancel_event=ev)
