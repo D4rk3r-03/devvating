@@ -223,3 +223,58 @@ class TestCancelacion:
         turns = ei.value.session.turns
         assert len(turns) == 1 and turns[0].agent == "claude"
         assert turns[0].phase == "propuesta"
+
+
+class StreamingStub(StubAdapter):
+    """Stub que declara streaming y emite deltas por `on_delta` en cada turno.
+
+    Simula el contrato de `ClaudeCliAdapter` sin subprocess: parte cada
+    respuesta en fragmentos y los emite, tal como el adaptador real reenvía los
+    text_delta del stream-json.
+    """
+
+    soporta_streaming = True
+
+    def __init__(self, name, respuestas, usages=None):
+        super().__init__(name, respuestas, usages)
+        self.on_delta = None
+
+    def converse(self, system, prompt, registry):
+        out = super().converse(system, prompt, registry)
+        if self.on_delta is not None:
+            for palabra in out.split(" "):
+                self.on_delta(palabra + " ")
+        return out
+
+
+class TestStreaming:
+    def test_orquestador_fija_on_delta_solo_en_los_que_soportan(self):
+        a = StreamingStub("claude", ["postura A", 'r {"convergencia": true}', "síntesis"])
+        b = StubAdapter("gemini", ["postura B", 'r {"convergencia": true}'])
+        orch = Orchestrator(a, b, repo_root=".")
+        orch.run(TOPIC, max_rounds=1)
+        assert callable(a.on_delta)  # se lo fijó el orquestador
+        assert not hasattr(b, "on_delta")  # al no soportar, no se toca
+
+    def test_los_deltas_llegan_como_eventos_delta_a_la_ui(self):
+        eventos = []
+        a = StreamingStub("claude", ["postura A", 'r {"convergencia": true}', "síntesis"])
+        b = StubAdapter("gemini", ["postura B", 'r {"convergencia": true}'])
+        orch = Orchestrator(
+            a, b, repo_root=".",
+            on_event=lambda ev, ag, tx: eventos.append((ev, ag, tx)),
+        )
+        orch.run(TOPIC, max_rounds=1)
+        deltas = [(ag, tx) for ev, ag, tx in eventos if ev == "delta"]
+        # Solo claude (el que soporta) emite deltas, y reconstruyen su texto.
+        assert deltas and all(ag == "claude" for ag, _ in deltas)
+        assert "".join(tx for _, tx in deltas).startswith("postura A")
+
+    def test_el_retorno_completo_no_depende_del_streaming(self):
+        # El orquestador es ciego al streaming: la síntesis y la convergencia
+        # salen del retorno completo de converse, no de los deltas.
+        a = StreamingStub("claude", ["A0", 'A1 {"convergencia": true}', "síntesis final"])
+        b = StreamingStub("gemini", ["B0", 'B1 {"convergencia": true}'])
+        orch = Orchestrator(a, b, repo_root=".")
+        s = orch.run(TOPIC, max_rounds=1)
+        assert s.converged and s.synthesis == "síntesis final"

@@ -52,7 +52,9 @@ class TestClasificacion:
         assert not isinstance(exc, TransientProviderError)
 
     def test_claude_cli_json_con_limite_de_sesion(self, fake_bin, tmp_path):
+        # La clasificación sale del mensaje 'result' del stream-json.
         out = json.dumps({
+            "type": "result",
             "result": "Session limit reached · resets 2:30pm",
             "is_error": True, "api_error_status": 429,
         })
@@ -62,8 +64,8 @@ class TestClasificacion:
         assert "2:30pm" in info.value.resets_at
 
     def test_claude_cli_json_con_5xx_es_transitorio(self, fake_bin, tmp_path):
-        out = json.dumps({"result": "server error", "is_error": True,
-                          "api_error_status": 529})
+        out = json.dumps({"type": "result", "result": "server error",
+                          "is_error": True, "api_error_status": 529})
         adapter = ClaudeCliAdapter(binary=fake_bin("claude", f"echo '{out}'"), cwd=str(tmp_path))
         with pytest.raises(TransientProviderError):
             adapter.converse("S", "P", REG)

@@ -191,6 +191,11 @@ class Orchestrator:
         for agent in self.agents:
             if hasattr(agent, "cancel_event"):
                 agent.cancel_event = cancel_event
+            # Streaming (opcional): el adaptador que lo soporte recibe un
+            # callback que reenvía cada delta como evento "delta" a la UI. El
+            # orquestador sigue ciego al streaming: usa solo el retorno completo.
+            if getattr(agent, "soporta_streaming", False):
+                agent.on_delta = self._delta_cb(agent.name)
         try:
             return self._correr(
                 session, topic, registry, max_rounds, min_rounds, synthesizer_index,
@@ -205,6 +210,12 @@ class Orchestrator:
             # parcial — los turnos completados nunca se pierden (plan §13).
             session.usage_totals = self._totalizar(session)
             raise DebateAbortedError(session, exc) from exc
+
+    def _delta_cb(self, nombre: str) -> Callable[[str], None]:
+        """Callback de streaming para un agente: cada fragmento va a la UI como
+        evento "delta". Cerrado sobre el nombre porque el adaptador solo pasa el
+        texto; el orquestador añade de quién es."""
+        return lambda fragmento: self._on_event("delta", nombre, fragmento)
 
     def _cancelado(self) -> bool:
         ev = getattr(self, "_cancel_event", None)

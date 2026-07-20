@@ -17,15 +17,18 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
+import threading
 import time
 
 from ..tools.registry import ToolRegistry
 from .base import (
     AgentCancelledError,
     AgentError,
+    DeltaCb,
     SessionLimitError,
     TransientProviderError,
     TurnUsage,
@@ -115,26 +118,140 @@ def _run(
                 raise CliAdapterError(f"El CLI de {name} superó el timeout de {timeout}s.")
 
 
-def _matar_grupo(proc: subprocess.Popen) -> None:
-    """Mata el árbol de procesos del CLI (grupo) y drena los pipes."""
+def _terminar_grupo(proc: subprocess.Popen) -> None:
+    """Mata el árbol de procesos del CLI (grupo). NO drena los pipes: úsalo
+    cuando otro hilo está leyendo stdout (camino streaming) — llamar aquí a
+    `communicate` chocaría con ese lector. El lector verá EOF y terminará solo.
+    """
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         proc.kill()  # el grupo ya murió, o no aplica: mata al menos el padre
+
+
+def _matar_grupo(proc: subprocess.Popen) -> None:
+    """Mata el árbol de procesos del CLI (grupo) y drena los pipes.
+
+    Camino por turnos (sin lector concurrente): tras matar, `communicate`
+    recoge lo que quedó en los pipes sin riesgo de deadlock.
+    """
+    _terminar_grupo(proc)
     try:
         proc.communicate(timeout=5)
     except (subprocess.TimeoutExpired, ValueError):
         pass
 
 
+def _run_stream(
+    argv: list[str],
+    cwd: str,
+    timeout: int,
+    name: str,
+    on_delta: DeltaCb | None,
+    cancel_event=None,
+) -> tuple[int, dict | None, str]:
+    """Corre un CLI con salida `stream-json` (JSONL) leyéndola incrementalmente.
+
+    Emite cada `text_delta` por `on_delta` a medida que llega y devuelve
+    `(returncode, mensaje 'result' | None, stderr)`. El mensaje `result` trae
+    los mismos campos que `--output-format json` (`result`, `is_error`,
+    `api_error_status`, `usage`, `total_cost_usd`), así que el parseo posterior
+    no cambia respecto al camino por turnos.
+
+    Un hilo lector consume stdout (y otro stderr, para no bloquear el proceso
+    si llena su pipe). Por eso, al cancelar/timeout se usa `_terminar_grupo`
+    (mata sin `communicate`): drenar con `communicate` chocaría con el lector.
+    Interrumpible: el hilo principal chequea `cancel_event` entre líneas y en
+    cada silencio de 0.5 s, y mata el subprocess en vuelo.
+    """
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env_suscripcion(), start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise CliAdapterError(
+            f"No se encontró el binario '{argv[0]}'. ¿Está instalado el CLI de {name}?"
+        ) from exc
+
+    lineas: queue.Queue = queue.Queue()
+    _FIN = object()
+
+    def _leer_stdout() -> None:
+        try:
+            for linea in proc.stdout:
+                lineas.put(linea)
+        finally:
+            lineas.put(_FIN)
+
+    err_partes: list[str] = []
+
+    def _leer_stderr() -> None:
+        try:
+            for linea in proc.stderr:
+                err_partes.append(linea)
+        except (ValueError, OSError):  # pipe cerrado al matar el grupo
+            pass
+
+    threading.Thread(target=_leer_stdout, daemon=True).start()
+    threading.Thread(target=_leer_stderr, daemon=True).start()
+
+    def _cancelado_o_timeout() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            _terminar_grupo(proc)
+            raise AgentCancelledError(f"{name}: turno cancelado por el vocero.")
+        if time.monotonic() - inicio > timeout:
+            _terminar_grupo(proc)
+            raise CliAdapterError(f"El CLI de {name} superó el timeout de {timeout}s.")
+
+    inicio = time.monotonic()
+    resultado: dict | None = None
+    while True:
+        try:
+            item = lineas.get(timeout=0.5)
+        except queue.Empty:
+            _cancelado_o_timeout()
+            continue
+        if item is _FIN:
+            break
+        _cancelado_o_timeout()  # streams veloces no pasan por el Empty de arriba
+        linea = item.strip()
+        if not linea:
+            continue
+        try:
+            msg = json.loads(linea)
+        except ValueError:
+            continue  # línea no-JSON (un log suelto del CLI): se ignora
+        tipo = msg.get("type")
+        if tipo == "result":
+            resultado = msg
+        elif tipo == "stream_event" and on_delta is not None:
+            evento = msg.get("event") or {}
+            if evento.get("type") == "content_block_delta":
+                delta = evento.get("delta") or {}
+                if delta.get("type") == "text_delta":
+                    texto = delta.get("text") or ""
+                    if texto:
+                        on_delta(texto)
+
+    proc.wait()
+    return proc.returncode, resultado, "".join(err_partes)
+
+
 class ClaudeCliAdapter:
     """Turno de debate vía Claude Code headless (`claude -p`).
 
-    Usa `--output-format json` para captar el texto final y las métricas del
-    turno (`usage`, `total_cost_usd`), mapeadas a TurnUsage en `last_usage`.
-    Por turno, nunca acumuladas aquí (plan §13: la totalización es del
-    orquestador; el estado acumulativo en el adaptador era el antipatrón).
+    Usa `--output-format stream-json` para emitir los tokens a medida que
+    llegan (streaming, `on_delta`) y captar el texto final y las métricas del
+    turno (`usage`, `total_cost_usd`) del mensaje `result`, mapeadas a
+    TurnUsage en `last_usage`. Por turno, nunca acumuladas aquí (plan §13: la
+    totalización es del orquestador; el estado acumulativo era el antipatrón).
+
+    Es el único adaptador con streaming hoy (`soporta_streaming`): el mensaje
+    muda por turno era el dolor de UX que D6 dejó pendiente hasta la web (M7).
     """
+
+    soporta_streaming = True
 
     def __init__(self, binary: str = "claude", cwd: str = ".", timeout: int = 600) -> None:
         self.name = "claude"
@@ -144,30 +261,36 @@ class ClaudeCliAdapter:
         self.last_usage: TurnUsage | None = None
         # Señal de cancelación (la fija el orquestador); None = no cancelable.
         self.cancel_event = None
+        # Callback de deltas (lo fija el orquestador); None = no emitir deltas.
+        self.on_delta: DeltaCb | None = None
 
     def build_argv(self, system: str, prompt: str) -> list[str]:
         # Solo herramientas de lectura: el debate nunca escribe (D5).
+        # stream-json + partial messages = tokens en vivo; `-p` con stream-json
+        # exige `--verbose` (lo pide el propio CLI).
         return [
             self.binary,
             "-p", prompt,
             "--append-system-prompt", system,
-            "--output-format", "json",
+            "--output-format", "stream-json",
+            "--include-partial-messages",
+            "--verbose",
             "--allowedTools", "Read,Glob,Grep",
         ]
 
     def converse(self, system: str, prompt: str, registry: ToolRegistry) -> str:
         self.last_usage = None
-        proc = _run(self.build_argv(system, prompt), self.cwd, self.timeout,
-                    "Claude Code", self.cancel_event)
-        if proc.returncode != 0:
-            detalle = (proc.stderr or proc.stdout).strip()[:500]
-            raise clasificar_fallo(detalle, f"claude -p salió con código {proc.returncode}")
-        try:
-            data = json.loads(proc.stdout)
-        except ValueError as exc:
+        returncode, data, err = _run_stream(
+            self.build_argv(system, prompt), self.cwd, self.timeout,
+            "Claude Code", self.on_delta, self.cancel_event,
+        )
+        if returncode != 0:
+            detalle = (err or (data or {}).get("result", "") or "").strip()[:500]
+            raise clasificar_fallo(detalle, f"claude -p salió con código {returncode}")
+        if data is None:
             raise CliAdapterError(
-                f"Salida no-JSON de claude -p: {proc.stdout.strip()[:200]}"
-            ) from exc
+                "La salida stream-json de claude -p no incluyó un mensaje 'result'."
+            )
         if data.get("is_error"):
             # El JSON trae la clasificación fina: texto del error + status API.
             detalle = str(data.get("result", ""))

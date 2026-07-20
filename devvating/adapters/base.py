@@ -12,9 +12,21 @@ cambia; el orquestador copia `last_usage` a cada `Turn` tras la llamada.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from ..tools.registry import ToolRegistry
+
+# Streaming de deltas (extensión opcional del contrato, plan del debate
+# "hecho, como seguimos?"). Un adaptador que soporte streaming declara
+# `soporta_streaming = True` y expone un atributo `on_delta`; el orquestador
+# lo fija (como ya hace con `cancel_event`) apuntando a un callback que lleva
+# cada fragmento a la UI. Reglas del diseño (D6): es SOLO cosmético — el
+# orquestador sigue recibiendo la réplica COMPLETA como retorno de `converse`,
+# y `_parse_verdict` opera sobre ese texto final, no sobre el flujo parcial.
+# Ni el Protocol ni `converse` cambian de firma; los adaptadores sin streaming
+# (API, CLIs de texto plano) simplemente no definen estos atributos y nunca
+# emiten deltas — el orquestador los consulta con getattr y un default seguro.
+DeltaCb = Callable[[str], None]
 
 
 # --- Taxonomía de fallos (plan del debate de resiliencia, 2026-07-13) --------

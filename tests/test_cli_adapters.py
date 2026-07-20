@@ -6,12 +6,31 @@ Se prueban contra binarios falsos (scripts bash en tmp) — sin CLIs reales.
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
+from devvating.adapters.base import AgentCancelledError
 from devvating.adapters.cli import ClaudeCliAdapter, CliAdapterError, GeminiCliAdapter
 from devvating.appconfig import ProjectConfig
 from devvating.tools.registry import ToolRegistry
+
+
+def _delta(texto: str) -> str:
+    """Una línea stream-json de tipo content_block_delta (como emite el CLI real)."""
+    return json.dumps({
+        "type": "stream_event",
+        "event": {"type": "content_block_delta", "index": 0,
+                  "delta": {"type": "text_delta", "text": texto}},
+    })
+
+
+def _result(**campos) -> str:
+    """La línea final 'result' del stream-json, con los campos que se pasen."""
+    base = {"type": "result", "subtype": "success", "is_error": False}
+    base.update(campos)
+    return json.dumps(base)
 
 
 @pytest.fixture
@@ -31,25 +50,32 @@ REG = ToolRegistry()
 
 
 class TestClaudeCliAdapter:
-    def test_argv_es_headless_json_y_solo_lectura(self):
+    def test_argv_es_headless_stream_json_y_solo_lectura(self):
         argv = ClaudeCliAdapter().build_argv("SYS", "PROMPT")
         assert argv[:3] == ["claude", "-p", "PROMPT"]
         assert "--append-system-prompt" in argv and "SYS" in argv
-        assert "--output-format" in argv and "json" in argv
-        i = argv.index("--allowedTools")
-        assert argv[i + 1] == "Read,Glob,Grep"
+        # stream-json para emitir tokens en vivo; partial-messages trae los
+        # deltas y `-p` con stream-json exige --verbose (lo pide el CLI).
+        i = argv.index("--output-format")
+        assert argv[i + 1] == "stream-json"
+        assert "--include-partial-messages" in argv
+        assert "--verbose" in argv
+        j = argv.index("--allowedTools")
+        assert argv[j + 1] == "Read,Glob,Grep"
         # Jamás los flags de escritura/peligro de la fase de ejecución.
         assert "--dangerously-skip-permissions" not in argv
         assert "acceptEdits" not in argv
 
+    def test_soporta_streaming(self):
+        # El front lee esta capacidad para decidir entre "en vivo" y "sin soporte".
+        assert ClaudeCliAdapter.soporta_streaming is True
+
     def test_parsea_result_y_usage_por_turno_sin_acumular(self, fake_bin, tmp_path):
         # Plan §13: last_usage es POR TURNO; la totalización es del orquestador.
-        out = json.dumps(
-            {"result": "postura de claude", "is_error": False,
-             "total_cost_usd": 0.0125,
-             "usage": {"input_tokens": 100, "output_tokens": 42,
-                       "cache_read_input_tokens": 7}}
-        )
+        # Los datos salen del mensaje 'result' del stream, no de la última línea.
+        out = _result(result="postura de claude", total_cost_usd=0.0125,
+                      usage={"input_tokens": 100, "output_tokens": 42,
+                             "cache_read_input_tokens": 7})
         binary = fake_bin("claude", f"echo '{out}'")
         adapter = ClaudeCliAdapter(binary=binary, cwd=str(tmp_path))
         assert adapter.converse("SYS", "P", REG) == "postura de claude"
@@ -59,9 +85,32 @@ class TestClaudeCliAdapter:
         assert u.cache_read_tokens == 7
         assert u.cost_usd == pytest.approx(0.0125)  # el del turno, no 0.025
 
-    def test_sin_usage_en_el_json_da_turnusage_con_ceros(self, fake_bin, tmp_path):
-        out = json.dumps({"result": "ok", "is_error": False})
-        adapter = ClaudeCliAdapter(binary=fake_bin("claude", f"echo '{out}'"), cwd=str(tmp_path))
+    def test_emite_los_deltas_por_on_delta_y_devuelve_el_result(self, fake_bin, tmp_path):
+        # Streaming: cada text_delta llega por on_delta a medida que se lee el
+        # stream; el retorno de converse sigue siendo el texto COMPLETO (el
+        # orquestador es ciego al streaming).
+        script = "\n".join([
+            f"echo '{_delta('Hola')}'",
+            f"echo '{_delta(', ')}'",
+            f"echo '{_delta('mundo')}'",
+            f"echo '{_result(result='Hola, mundo')}'",
+        ])
+        adapter = ClaudeCliAdapter(binary=fake_bin("claude", script), cwd=str(tmp_path))
+        recibidos: list[str] = []
+        adapter.on_delta = recibidos.append
+        assert adapter.converse("SYS", "P", REG) == "Hola, mundo"
+        assert recibidos == ["Hola", ", ", "mundo"]
+
+    def test_sin_on_delta_no_falla(self, fake_bin, tmp_path):
+        # Sin callback fijado (on_delta=None por defecto) los deltas se ignoran.
+        script = f"echo '{_delta('x')}'\necho '{_result(result='ok')}'"
+        adapter = ClaudeCliAdapter(binary=fake_bin("claude", script), cwd=str(tmp_path))
+        assert adapter.converse("SYS", "P", REG) == "ok"
+
+    def test_sin_usage_en_el_result_da_turnusage_con_ceros(self, fake_bin, tmp_path):
+        adapter = ClaudeCliAdapter(
+            binary=fake_bin("claude", f"echo '{_result(result='ok')}'"), cwd=str(tmp_path)
+        )
         adapter.converse("SYS", "P", REG)
         assert adapter.last_usage.input_tokens == 0
         assert adapter.last_usage.cost_usd is None
@@ -73,32 +122,56 @@ class TestClaudeCliAdapter:
             adapter.converse("SYS", "P", REG)
 
     def test_is_error_del_cli_levanta_error(self, fake_bin, tmp_path):
-        out = json.dumps({"result": "sin sesión", "is_error": True})
+        out = _result(result="sin sesión", is_error=True)
         binary = fake_bin("claude", f"echo '{out}'")
         adapter = ClaudeCliAdapter(binary=binary, cwd=str(tmp_path))
         with pytest.raises(CliAdapterError, match="reportó error"):
             adapter.converse("SYS", "P", REG)
 
-    def test_salida_no_json_levanta_error(self, fake_bin, tmp_path):
-        binary = fake_bin("claude", "echo 'texto plano'")
+    def test_stream_sin_mensaje_result_levanta_error(self, fake_bin, tmp_path):
+        # Solo deltas, sin 'result': el turno no cerró bien → error claro.
+        binary = fake_bin("claude", f"echo '{_delta('a medias')}'")
         adapter = ClaudeCliAdapter(binary=binary, cwd=str(tmp_path))
-        with pytest.raises(CliAdapterError, match="no-JSON"):
+        with pytest.raises(CliAdapterError, match="no incluyó un mensaje 'result'"):
             adapter.converse("SYS", "P", REG)
+
+    def test_lineas_no_json_se_ignoran(self, fake_bin, tmp_path):
+        # El CLI puede colar un log suelto no-JSON; no debe romper el parseo.
+        script = f"echo 'log suelto del CLI'\necho '{_result(result='ok')}'"
+        adapter = ClaudeCliAdapter(binary=fake_bin("claude", script), cwd=str(tmp_path))
+        assert adapter.converse("SYS", "P", REG) == "ok"
 
     def test_binario_inexistente_da_mensaje_claro(self, tmp_path):
         adapter = ClaudeCliAdapter(binary=str(tmp_path / "no-existe"), cwd=str(tmp_path))
         with pytest.raises(CliAdapterError, match="No se encontró el binario"):
             adapter.converse("SYS", "P", REG)
 
+    def test_cancelacion_a_mitad_de_stream_mata_el_subprocess(self, fake_bin, tmp_path):
+        # El cambio a lecturas incrementales alteró la mecánica de _matar_grupo
+        # (ya no drena con communicate porque un hilo lee stdout). Regresión: al
+        # cancelar con el stream en vuelo, el subprocess muere pronto — no se
+        # espera al timeout ni cuelga el lector.
+        binary = fake_bin("claude", f"echo '{_delta('arranco')}'; sleep 30")
+        adapter = ClaudeCliAdapter(binary=binary, cwd=str(tmp_path), timeout=600)
+        cancel = threading.Event()
+        adapter.cancel_event = cancel
+        threading.Timer(0.5, cancel.set).start()
+        inicio = time.monotonic()
+        with pytest.raises(AgentCancelledError, match="cancelado por el vocero"):
+            adapter.converse("SYS", "P", REG)
+        assert time.monotonic() - inicio < 10  # no esperó los 30s del sleep
+
     def test_no_hereda_la_clave_api_al_subprocess(self, fake_bin, tmp_path, monkeypatch):
         # Trampa de precedencia: si el CLI ve ANTHROPIC_API_KEY, factura contra
-        # la clave en vez de usar la suscripción. El adaptador debe quitarla.
+        # la clave en vez de usar la suscripción. El adaptador debe quitarla —
+        # se re-verifica con la invocación nueva (stream-json).
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-falsa")
         monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token-falso")
+        con = _result(result="con clave")
+        sin = _result(result="sin clave")
         script = (
             'if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then '
-            "echo '{\"result\": \"con clave\", \"is_error\": false}'; "
-            "else echo '{\"result\": \"sin clave\", \"is_error\": false}'; fi"
+            f"echo '{con}'; else echo '{sin}'; fi"
         )
         adapter = ClaudeCliAdapter(binary=fake_bin("claude", script), cwd=str(tmp_path))
         assert adapter.converse("SYS", "P", REG) == "sin clave"
