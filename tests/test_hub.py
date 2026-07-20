@@ -40,6 +40,19 @@ def _fabrica_streaming(nombres, cfg, repo):
     return a, b
 
 
+_BLOQUE_DECISION = (
+    '{"decisiones":[{"id":"d1","pregunta":"¿A o B?","opciones":["A","B"],'
+    '"recomendada":"A","crucial":true,"contra":"sin contraargumento en el debate"}]}'
+)
+
+
+def _fabrica_con_decision(nombres, cfg, repo):
+    a = StubAdapter("claude", ["A0", 'A1 {"convergencia": false}',
+                               "## Plan propuesto\npasos\n\n" + _BLOQUE_DECISION])
+    b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": false}'])
+    return a, b
+
+
 CONFIG = {"tema": "¿tema del hub?", "agentes": ["claude-cli", "gemini-api"], "rounds": 1}
 
 
@@ -96,6 +109,15 @@ class TestWorker:
         # Y los deltas viajan como eventos "delta", solo del agente que emite.
         deltas = [e for e in eventos2 if e["tipo"] == "evento" and e["evento"] == "delta"]
         assert deltas and all(d["agente"] == "claude" for d in deltas)
+
+    def test_fin_lleva_decisiones_y_estado(self, tmp_path):
+        eventos: list[dict] = []
+        _debate_worker({**CONFIG, "repo": str(tmp_path)}, eventos.append, _fabrica_con_decision)
+        fin = next(e for e in eventos if e["tipo"] == "fin")
+        assert fin["estado"] == "pendiente_decision"
+        assert [d["id"] for d in fin["decisiones"]] == ["d1"]
+        assert fin["decisiones"][0]["crucial"] is True
+        assert "decisiones" not in fin["sintesis"]  # el bloque se despojó
 
     def test_par_invalido_emite_error_y_cierra(self, tmp_path):
         eventos: list[dict] = []
@@ -160,6 +182,43 @@ class TestApi:
             assert "delta" not in tipos_evento          # transitorios, fuera
             assert "sintesis_fin" in tipos_evento        # el turno final, dentro
             assert any(e["tipo"] == "capacidades" for e in historial["eventos"])
+
+    def test_resolver_decisiones_persiste_y_devuelve_pendientes(self, cliente):
+        c, tmp = cliente
+        nombre = "20260720-000000-x.json"
+        carpeta = tmp / "transcripts"
+        carpeta.mkdir(exist_ok=True)
+        (carpeta / nombre).write_text(json.dumps({
+            "topic": {"prompt": "t"}, "synthesis": "p",
+            "decisiones": [
+                {"id": "d1", "pregunta": "¿A o B?", "crucial": True, "resuelta": False, "eleccion": ""},
+                {"id": "d2", "pregunta": "otra", "crucial": True, "resuelta": False, "eleccion": ""},
+            ],
+        }), encoding="utf-8")
+        # Resuelvo solo d1 (elijo A); d2 sigue pendiente.
+        r = c.post("/api/decisiones", json={
+            "transcript": nombre,
+            "decisiones": [{"id": "d1", "eleccion": "A", "resuelta": True}],
+        })
+        assert r.status_code == 200 and r.json()["pendientes"] == ["otra"]
+        data = json.loads((carpeta / nombre).read_text(encoding="utf-8"))
+        d1 = next(d for d in data["decisiones"] if d["id"] == "d1")
+        assert d1["resuelta"] is True and d1["eleccion"] == "A"
+
+    def test_desmarcar_crucial_desbloquea(self, cliente):
+        c, tmp = cliente
+        nombre = "20260720-000001-y.json"
+        carpeta = tmp / "transcripts"
+        carpeta.mkdir(exist_ok=True)
+        (carpeta / nombre).write_text(json.dumps({
+            "topic": {"prompt": "t"}, "synthesis": "p",
+            "decisiones": [{"id": "d1", "pregunta": "¿A o B?", "crucial": True, "resuelta": False}],
+        }), encoding="utf-8")
+        # El vocero desmarca 'crucial': deja de bloquear aunque no la resuelva.
+        r = c.post("/api/decisiones", json={
+            "transcript": nombre, "decisiones": [{"id": "d1", "crucial": False}],
+        })
+        assert r.status_code == 200 and r.json()["pendientes"] == []
 
     def test_valida_tema_y_par(self, cliente):
         c, _ = cliente

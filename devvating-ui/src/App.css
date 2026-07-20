@@ -277,6 +277,73 @@
 }
 .panel-sintesis .ejecutar:disabled { opacity: .45; cursor: not-allowed; }
 
+/* Decisiones del vocero (F2) */
+.badge-estado {
+  margin-left: .5rem; padding: .1rem .5rem; border-radius: 999px;
+  font-size: .68rem; font-weight: 600; vertical-align: middle;
+  background: rgba(245, 158, 11, .16); color: var(--warning);
+  border: 1px solid rgba(245, 158, 11, .4);
+}
+.panel-decisiones {
+  margin: 1rem 0 .4rem; padding: .9rem 1rem; border-radius: var(--radius-md);
+  background: var(--bg-surface); border: 1px solid var(--border);
+}
+.panel-decisiones h4 {
+  display: flex; align-items: center; gap: .4rem; margin: 0 0 .7rem;
+  font-size: .85rem;
+}
+.decision {
+  padding: .7rem .8rem; margin-bottom: .7rem; border-radius: var(--radius-md);
+  background: var(--bg-surface-elevated); border-left: 3px solid var(--border);
+}
+.decision.es-crucial { border-left-color: var(--warning); }
+.d-pregunta { margin: 0 0 .5rem; font-weight: 600; font-size: .85rem; }
+.d-crucial {
+  margin-left: .5rem; padding: .05rem .4rem; border-radius: 4px;
+  font-size: .65rem; font-weight: 700; text-transform: uppercase;
+  background: rgba(245, 158, 11, .16); color: var(--warning);
+}
+.d-opciones { display: flex; flex-direction: column; gap: .35rem; }
+.d-opciones label {
+  display: flex; align-items: center; gap: .45rem; font-size: .82rem;
+  cursor: pointer; color: var(--text-main);
+}
+.d-op-txt { flex: 0 1 auto; }
+.d-reco { color: var(--success); font-size: .72rem; font-weight: 600; }
+.d-propia input[type="text"] {
+  flex: 1; min-width: 8rem; padding: .3rem .5rem; font: inherit; font-size: .8rem;
+  background: var(--bg-surface); color: var(--text-main);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.d-contra {
+  margin: .5rem 0 .3rem; font-size: .78rem; color: var(--text-muted);
+  line-height: 1.4;
+}
+.d-marca {
+  display: inline-flex; align-items: center; gap: .2rem; margin-left: .4rem;
+  color: var(--warning); font-size: .72rem;
+}
+.d-check { font-size: .76rem; color: var(--text-muted); margin-top: .4rem; }
+.d-acciones { display: flex; align-items: center; gap: .7rem; }
+.guardar-decisiones {
+  display: inline-flex; align-items: center; gap: .4rem; padding: .4rem .8rem;
+  font: inherit; font-size: .78rem; font-weight: 600; cursor: pointer;
+  background: transparent; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: var(--radius-md);
+}
+.guardar-decisiones:disabled { opacity: .5; cursor: not-allowed; }
+.d-guardado { font-size: .76rem; color: var(--success); }
+.pista-gate {
+  margin: .6rem 0 0; font-size: .78rem; color: var(--warning);
+  display: flex; align-items: center; gap: .35rem; flex-wrap: wrap;
+}
+.forzar-link {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--text-muted); text-decoration: underline; font: inherit;
+  font-size: .78rem;
+}
+.forzar-link:hover { color: var(--warning); }
+
 .panel-ejecucion { padding: 1.1rem 1.3rem; border-left: 4px solid var(--info); }
 .panel-ejecucion:hover { transform: none; }
 .panel-ejecucion.error { border-left-color: var(--danger); }

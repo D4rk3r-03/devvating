@@ -184,6 +184,10 @@ def _debate_worker(
         "ronda_convergencia": session.converged_round,
         "usage": {k: asdict(v) for k, v in session.usage_totals.items()},
         "transcript": path.name,
+        # Decisiones que el vocero debe resolver para cerrar el plan (F2), y el
+        # estado nominal (convergido / abierto / pendiente_decision).
+        "decisiones": [asdict(d) for d in session.decisiones],
+        "estado": session.estado,
     })
     emitir({"tipo": "cerrado"})
 
@@ -425,6 +429,35 @@ def crear_app(
             raise HTTPException(409, "No hay ninguna intervención pendiente.")
         app.state.notas.put(str(cuerpo.get("nota") or "").strip())
         return {"ok": True}
+
+    @app.post("/api/decisiones", dependencies=[_csrf])
+    def resolver_decisiones(cuerpo: dict) -> dict:
+        """Persiste en el transcript la resolución del vocero (F2).
+
+        Por decisión: `eleccion` (opción elegida o texto propio), `resuelta`, y
+        opcionalmente `crucial` (el vocero puede confirmar o desmarcar lo que el
+        agente propuso). Devuelve las preguntas crucial que aún faltan — la misma
+        verdad que usa el gate del executor.
+        """
+        nombre = str(cuerpo.get("transcript", ""))
+        ruta = _ruta_transcript(nombre)
+        data = json.loads(ruta.read_text(encoding="utf-8"))
+        resoluciones = {
+            str(r.get("id")): r
+            for r in cuerpo.get("decisiones", [])
+            if isinstance(r, dict) and r.get("id")
+        }
+        for d in data.get("decisiones", []):
+            r = resoluciones.get(str(d.get("id")))
+            if r is None:
+                continue
+            if "eleccion" in r:
+                d["eleccion"] = str(r.get("eleccion") or "")
+            d["resuelta"] = bool(r.get("resuelta", d.get("resuelta", False)))
+            if "crucial" in r:  # el vocero confirma o desmarca lo crucial
+                d["crucial"] = bool(r["crucial"])
+        ruta.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "pendientes": decisiones_crucial_sin_resolver(data.get("decisiones"))}
 
     @app.post("/api/ejecutar", status_code=202, dependencies=[_csrf])
     def ejecutar(cuerpo: dict) -> dict:

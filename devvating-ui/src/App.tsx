@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import {
-  Ban, Check, FileText, GitBranch, Hand, Play, RefreshCw, RotateCcw, Scale, Send,
-  Swords, Trash2, TriangleAlert,
+  Ban, Check, FileText, GitBranch, Hand, ListChecks, Play, RefreshCw, RotateCcw,
+  Scale, Send, Swords, Trash2, TriangleAlert,
 } from "lucide-react";
 import "./App.css";
 
@@ -16,7 +16,7 @@ type Msg =
   | { tipo: "inicio"; config: { tema: string; agentes: string[]; rounds: number; profundo: boolean; interactivo?: boolean; sesgos?: string[] } }
   | { tipo: "capacidades"; streaming: Record<string, boolean> }
   | { tipo: "evento"; evento: string; agente: string; texto: string | null }
-  | { tipo: "fin"; sintesis: string; sintetizador: string; convergio: boolean; ronda_convergencia: number | null; usage: Record<string, Usage>; transcript: string }
+  | { tipo: "fin"; sintesis: string; sintetizador: string; convergio: boolean; ronda_convergencia: number | null; usage: Record<string, Usage>; transcript: string; decisiones?: Decision[]; estado?: string }
   | { tipo: "error"; mensaje: string; resets_at?: string | null; parcial?: string | null }
   | { tipo: "intervencion_pendiente"; ronda: number; timeout: number }
   | { tipo: "intervencion_resuelta"; ronda: number; texto: string | null }
@@ -32,6 +32,12 @@ type Item =
   | { clase: "separador"; texto: string }
   | { clase: "turno"; agente: string; fase: string; texto: string }
   | { clase: "aviso"; texto: string };
+
+type Decision = {
+  id: string; pregunta: string; opciones: string[]; recomendada: string;
+  crucial: boolean; contra: string; contra_en_debate: boolean;
+  resuelta: boolean; eleccion: string;
+};
 
 type Rama = { nombre: string; sha: string; fecha: string; asunto: string; actual: boolean };
 
@@ -91,6 +97,99 @@ function Pendiente(
   );
 }
 
+// Panel de resolución de decisiones (F2): por decisión, opciones + recomendada
+// + 'contra' (con marca si la cita no se verificó) + escribir la propia +
+// confirmar/desmarcar 'crucial'. Al guardar, persiste en el transcript y
+// devuelve qué decisiones cruciales siguen pendientes (gatean la ejecución).
+function PanelDecisiones({ decisiones, transcript, post, onResuelto }: {
+  decisiones: Decision[]; transcript: string;
+  post: (u: string, b?: unknown) => Promise<Response>;
+  onResuelto: (pendientes: string[]) => void;
+}) {
+  const [elec, setElec] = useState<Record<string, string>>({});
+  const [propia, setPropia] = useState<Record<string, string>>({});
+  const [usaPropia, setUsaPropia] = useState<Record<string, boolean>>({});
+  const [crucial, setCrucial] = useState<Record<string, boolean>>(
+    () => Object.fromEntries(decisiones.map((d) => [d.id, d.crucial])),
+  );
+  const [guardando, setGuardando] = useState(false);
+  const [guardado, setGuardado] = useState(false);
+
+  const eleccionDe = (d: Decision) =>
+    (usaPropia[d.id] ? propia[d.id] : elec[d.id]) ?? "";
+
+  const guardar = async () => {
+    setGuardando(true);
+    const r = await post("/api/decisiones", {
+      transcript,
+      decisiones: decisiones.map((d) => ({
+        id: d.id, eleccion: eleccionDe(d),
+        resuelta: !!eleccionDe(d).trim(), crucial: crucial[d.id],
+      })),
+    });
+    setGuardando(false);
+    if (r.ok) {
+      const { pendientes } = await r.json();
+      setGuardado(true);
+      onResuelto(pendientes ?? []);
+    }
+  };
+
+  return (
+    <div className="panel-decisiones">
+      <h4><ListChecks size={15} /> Decisiones para cerrar el plan</h4>
+      {decisiones.map((d) => (
+        <div key={d.id} className={`decision${crucial[d.id] ? " es-crucial" : ""}`}>
+          <p className="d-pregunta">
+            {d.pregunta}
+            {crucial[d.id] && <span className="d-crucial">crucial</span>}
+          </p>
+          <div className="d-opciones">
+            {d.opciones.map((o) => (
+              <label key={o}>
+                <input type="radio" name={`d-${d.id}`}
+                  checked={!usaPropia[d.id] && elec[d.id] === o}
+                  onChange={() => { setUsaPropia({ ...usaPropia, [d.id]: false }); setElec({ ...elec, [d.id]: o }); }} />
+                <span className="d-op-txt">{o}</span>
+                {o === d.recomendada && <b className="d-reco">★ recomendada</b>}
+              </label>
+            ))}
+            <label className="d-propia">
+              <input type="radio" name={`d-${d.id}`} checked={!!usaPropia[d.id]}
+                onChange={() => setUsaPropia({ ...usaPropia, [d.id]: true })} />
+              <input type="text" placeholder="…o escribe la tuya"
+                value={propia[d.id] ?? ""}
+                onFocus={() => setUsaPropia({ ...usaPropia, [d.id]: true })}
+                onChange={(e) => setPropia({ ...propia, [d.id]: e.target.value })} />
+            </label>
+          </div>
+          {d.contra && (
+            <p className="d-contra">
+              <b>Contra:</b> {d.contra}
+              {!d.contra_en_debate && (
+                <span className="d-marca" title="La cita no se localizó en la transcripción; verifícala a mano.">
+                  <TriangleAlert size={12} /> cita no verificada
+                </span>
+              )}
+            </p>
+          )}
+          <label className="check d-check">
+            <input type="checkbox" checked={crucial[d.id]}
+              onChange={(e) => setCrucial({ ...crucial, [d.id]: e.target.checked })} />
+            crucial — bloquea la ejecución hasta resolverla
+          </label>
+        </div>
+      ))}
+      <div className="d-acciones">
+        <button className="guardar-decisiones" onClick={guardar} disabled={guardando}>
+          <Check size={14} /> {guardado ? "Guardar cambios" : "Guardar decisiones"}
+        </button>
+        {guardado && <span className="d-guardado">Guardado en el transcript.</span>}
+      </div>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ App
 export default function App() {
   const [roster, setRoster] = useState<string[]>([]);
@@ -117,6 +216,8 @@ export default function App() {
   const [nota, setNota] = useState("");
   const [ejecutando, setEjecutando] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
+  // Preguntas de decisiones cruciales aún sin resolver: gatean "Ejecutar plan".
+  const [decisionesPendientes, setDecisionesPendientes] = useState<string[]>([]);
 
   const finRef = useRef<HTMLDivElement>(null);
 
@@ -244,6 +345,13 @@ export default function App() {
     return { items, pendiente, capacidades, config, fin, error, cancelado, intervencion, ejecucion, cierre };
   }, [msgs]);
 
+  // Al llegar la síntesis, las decisiones cruciales sin resolver gatean la
+  // ejecución (el PanelDecisiones actualiza esto al guardar).
+  useEffect(() => {
+    const ds = fin?.decisiones ?? [];
+    setDecisionesPendientes(ds.filter((d) => d.crucial && !d.resuelta).map((d) => d.pregunta));
+  }, [fin]);
+
   useEffect(() => {
     if (ejecucion && ejecucion.estado !== "corriendo") setEjecutando(false);
     // Sugerencia editable de mensaje de commit: el tema del debate.
@@ -282,9 +390,9 @@ export default function App() {
     setNota("");
   };
 
-  const ejecutarPlan = async (transcript: string) => {
+  const ejecutarPlan = async (transcript: string, forzar = false) => {
     setEjecutando(true);
-    const r = await post("/api/ejecutar", { transcript });
+    const r = await post("/api/ejecutar", { transcript, forzar_decisiones: forzar });
     if (!r.ok) {
       setEjecutando(false);
       setAviso((await r.json()).detail ?? "No se pudo lanzar la ejecución.");
@@ -529,8 +637,15 @@ export default function App() {
           {fin && (
             <div className="panel-sintesis glass-panel">
               <h3><Scale size={16} /> Síntesis (por {fin.sintetizador}) ·{" "}
-                {fin.convergio ? `convergieron en la ronda ${fin.ronda_convergencia}` : "sin convergencia"}</h3>
+                {fin.convergio ? `convergieron en la ronda ${fin.ronda_convergencia}` : "sin convergencia"}
+                {fin.estado === "pendiente_decision" &&
+                  <span className="badge-estado" title="El plan tiene decisiones cruciales sin resolver.">
+                    pendiente de decisión</span>}</h3>
               <div className="cuerpo" dangerouslySetInnerHTML={md(fin.sintesis)} />
+              {fin.decisiones && fin.decisiones.length > 0 && (
+                <PanelDecisiones decisiones={fin.decisiones} transcript={fin.transcript}
+                  post={post} onResuelto={setDecisionesPendientes} />
+              )}
               <footer>
                 {Object.entries(fin.usage).map(([n, u]) => (
                   <span key={n} className="uso">
@@ -542,12 +657,24 @@ export default function App() {
                   target="_blank" rel="noreferrer" className="ver-reporte">
                   <FileText size={14} /> reporte completo
                 </a>
-                <button className="ejecutar" disabled={ejecutando || corriendo}
+                <button className="ejecutar"
+                  disabled={ejecutando || corriendo || decisionesPendientes.length > 0}
                   onClick={() => ejecutarPlan(fin.transcript)}
-                  title="Aplica el plan en una rama nueva; nada se commitea.">
+                  title={decisionesPendientes.length > 0
+                    ? "Resuelve las decisiones cruciales antes de ejecutar."
+                    : "Aplica el plan en una rama nueva; nada se commitea."}>
                   <GitBranch size={14} /> {ejecutando ? "Ejecutando…" : "Ejecutar plan"}
                 </button>
               </footer>
+              {decisionesPendientes.length > 0 && (
+                <p className="pista-gate">
+                  <TriangleAlert size={13} /> Faltan decisiones cruciales:{" "}
+                  {decisionesPendientes.join("; ")}.{" "}
+                  <button className="forzar-link" onClick={() => ejecutarPlan(fin.transcript, true)}>
+                    forzar ejecución bajo mi riesgo
+                  </button>
+                </p>
+              )}
             </div>
           )}
 
