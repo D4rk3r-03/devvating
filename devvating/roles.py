@@ -133,7 +133,23 @@ SINTETIZADOR = (
     "## Desacuerdos abiertos\n(cada uno con el argumento de cada lado; si no "
     "quedó ninguno, escribe 'Ninguno')\n"
     "## Plan propuesto\n(pasos concretos y archivos a tocar; marca lo que aún "
-    "depende de una decisión del vocero)"
+    "depende de una decisión del vocero)\n\n"
+    "Al FINAL de todo, en UNA sola línea y sin nada después, emite un bloque "
+    "JSON COMPACTO con las decisiones que el vocero debe tomar para cerrar el "
+    "plan (las que marcaste como dependientes de él). Formato EXACTO:\n"
+    '{"decisiones":[{"id":"d1","pregunta":"…","opciones":["opción A (según '
+    'claude#1, ronda 2)","opción B (según claude#2, ronda 3)"],"recomendada":'
+    '"opción A (según claude#1, ronda 2)","crucial":true,"contra":"«fragmento '
+    'textual del mejor argumento en contra»"}]}\n'
+    "Reglas del bloque:\n"
+    "- Cada opción y la recomendada CITAN al agente y la ronda de donde salen.\n"
+    "- 'contra' es el mejor argumento contra la recomendada, con un fragmento "
+    "TEXTUAL entre «comillas angulares» copiado de la transcripción para que sea "
+    "verificable. Si no hubo contraargumento real, escribe exactamente 'sin "
+    "contraargumento en el debate'.\n"
+    "- 'crucial' es true SOLO si el plan no puede cerrarse sin esa decisión.\n"
+    "- Si no queda ninguna decisión abierta, emite exactamente {\"decisiones\":[]}.\n"
+    "- El bloque va solo al final; no lo comentes ni lo repitas."
 )
 
 # --- Constructores de prompt por fase ----------------------------------------

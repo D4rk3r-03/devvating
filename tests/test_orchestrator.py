@@ -9,9 +9,14 @@ import pytest
 from devvating import roles
 from devvating.orchestrator import (
     DebateCancelledError,
+    DebateSession,
     DebateTopic,
+    Decision,
     Orchestrator,
+    _estado_de,
+    _parse_decisiones,
     _parse_verdict,
+    _verificar_contra,
 )
 from tests.conftest import StubAdapter
 
@@ -303,3 +308,105 @@ class TestStreaming:
         with pytest.raises(DebateAbortedError):
             orch.run(TOPIC, max_rounds=1)
         assert a.on_delta is None
+
+
+# Bloque JSON de ejemplo con dos decisiones (una crucial, una no).
+_BLOQUE = (
+    '{"decisiones":[{"id":"d1","pregunta":"¿A o B?",'
+    '"opciones":["A (según claude#1, ronda 2)","B (según claude#2, ronda 3)"],'
+    '"recomendada":"A (según claude#1, ronda 2)","crucial":true,'
+    '"contra":"«el reset --hard es un peligro activo hoy»"},'
+    '{"id":"d2","pregunta":"¿banner tri-estado?","opciones":["sí","no"],'
+    '"recomendada":"no","crucial":false,"contra":"sin contraargumento en el debate"}]}'
+)
+
+
+class TestParseDecisiones:
+    def test_extrae_y_despoja_el_bloque(self):
+        clean, decs = _parse_decisiones("## Plan\ntexto visible\n\n" + _BLOQUE)
+        assert "texto visible" in clean and "decisiones" not in clean
+        assert [d.id for d in decs] == ["d1", "d2"]
+        assert decs[0].crucial is True and decs[1].crucial is False
+        assert decs[0].recomendada.startswith("A")
+        assert len(decs[0].opciones) == 2
+
+    def test_sin_bloque_devuelve_lista_vacia(self):
+        clean, decs = _parse_decisiones("una síntesis sin bloque de decisiones")
+        assert decs == [] and clean == "una síntesis sin bloque de decisiones"
+
+    def test_bloque_vacio_es_lista_vacia(self):
+        clean, decs = _parse_decisiones('cierre\n{"decisiones":[]}')
+        assert decs == [] and clean == "cierre"
+
+    def test_json_roto_cae_a_vacio_sin_excepcion(self):
+        clean, decs = _parse_decisiones('texto\n{"decisiones":[{"id":"d1", roto')
+        assert decs == [] and "texto" in clean
+
+    def test_campos_faltantes_toman_defaults(self):
+        clean, decs = _parse_decisiones('{"decisiones":[{"id":"x"}]}')
+        assert len(decs) == 1
+        d = decs[0]
+        assert d.pregunta == "" and d.opciones == [] and d.crucial is False
+
+    def test_convive_con_el_bloque_de_veredicto(self):
+        # Robustez: si por lo que sea aparece también un veredicto, solo se
+        # despoja el de decisiones; el otro texto queda intacto.
+        texto = 'algo {"convergencia": true} más\n' + _BLOQUE
+        clean, decs = _parse_decisiones(texto)
+        assert '{"convergencia": true}' in clean
+        assert [d.id for d in decs] == ["d1", "d2"]
+
+
+class TestVerificarContra:
+    def test_cita_presente_en_la_transcripcion_verifica(self):
+        _, decs = _parse_decisiones(_BLOQUE)
+        _verificar_contra(decs, "… el reset --hard es un peligro activo hoy, dijo claude#1 …")
+        assert decs[0].contra_en_debate is True
+
+    def test_cita_ausente_marca_no_verificable(self):
+        _, decs = _parse_decisiones(_BLOQUE)
+        _verificar_contra(decs, "una transcripción que no contiene esa frase")
+        assert decs[0].contra_en_debate is False
+
+    def test_sin_contraargumento_no_se_marca(self):
+        _, decs = _parse_decisiones(_BLOQUE)
+        _verificar_contra(decs, "cualquier cosa")
+        assert decs[1].contra_en_debate is True  # 'sin contraargumento' = honesto
+
+    def test_contra_sin_fragmento_citado_no_es_verificable(self):
+        d = Decision(id="d", pregunta="p", contra="creo que es mala idea, sin comillas")
+        _verificar_contra([d], "la transcripción entera")
+        assert d.contra_en_debate is False
+
+
+class TestEstado:
+    def _sesion(self, converged, decisiones):
+        return DebateSession(topic=TOPIC, converged=converged, decisiones=decisiones)
+
+    def test_crucial_abierta_es_pendiente_decision(self):
+        s = self._sesion(True, [Decision(id="d", pregunta="p", crucial=True)])
+        assert _estado_de(s) == "pendiente_decision"  # manda sobre la convergencia
+
+    def test_crucial_resuelta_no_bloquea(self):
+        s = self._sesion(True, [Decision(id="d", pregunta="p", crucial=True, resuelta=True)])
+        assert _estado_de(s) == "convergido"
+
+    def test_convergido_sin_decisiones(self):
+        assert _estado_de(self._sesion(True, [])) == "convergido"
+
+    def test_abierto_sin_convergencia_ni_decisiones(self):
+        assert _estado_de(self._sesion(False, [])) == "abierto"
+
+
+class TestDecisionesEnElFlujo:
+    def test_la_sintesis_puebla_decisiones_y_despoja_el_bloque(self):
+        sintesis = "## Acuerdos\nvarios\n\n## Plan propuesto\npasos\n\n" + _BLOQUE
+        a = StubAdapter("claude", ["A0", 'A1 {"convergencia": false}', sintesis])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": false}'])
+        orch = Orchestrator(a, b, repo_root=".")
+        s = orch.run(TOPIC, max_rounds=1)
+        assert "decisiones" not in s.synthesis  # despojado del texto visible
+        assert [d.id for d in s.decisiones] == ["d1", "d2"]
+        assert s.estado == "pendiente_decision"  # hay una crucial sin resolver
+        # El turno guardado también quedó limpio (para el reporte y el resume).
+        assert "decisiones" not in s.turns[-1].text

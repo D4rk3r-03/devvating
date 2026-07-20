@@ -534,6 +534,36 @@ class TestEjecucion:
             assert fin and fin["rama"].startswith("devvating/")
             assert fin["archivos"] == ["hola.txt"] and "mundo-hub" in fin["diff"]
 
+    def test_gate_bloquea_ejecutar_con_decision_crucial_y_permite_forzar(self, git_repo):
+        self._ignorar_transcripts(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor())
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            nombre = "20260720-000000-con-decision.json"
+            carpeta = git_repo / "transcripts"
+            carpeta.mkdir(exist_ok=True)
+            (carpeta / nombre).write_text(json.dumps({
+                "topic": {"prompt": "tema"}, "synthesis": "un plan",
+                "decisiones": [{"pregunta": "¿A o B?", "crucial": True, "resuelta": False}],
+            }), encoding="utf-8")
+            # Sin forzar: el gate devuelve 422 con la pregunta pendiente.
+            r = c.post("/api/ejecutar", json={"transcript": nombre})
+            assert r.status_code == 422
+            assert "sin resolver" in r.json()["detail"] and "¿A o B?" in r.json()["detail"]
+            # Con override explícito: pasa y ejecuta.
+            with c.websocket_connect("/ws") as ws:
+                ws.receive_json()  # historial
+                r2 = c.post("/api/ejecutar",
+                            json={"transcript": nombre, "forzar_decisiones": True})
+                assert r2.status_code == 202
+                for _ in range(60):
+                    msg = ws.receive_json()
+                    if msg["tipo"] == "ejecucion_fin":
+                        break
+                    if msg["tipo"] == "ejecucion_error":
+                        pytest.fail(msg["mensaje"])
+
     def test_verificacion_de_devvating_json_no_corre_desde_el_hub(self, git_repo):
         # Alcance diferido (M9): el Hub no expone verify_command, a diferencia
         # de la CLI (ejecutar.py --verificar). Ancla el comportamiento actual

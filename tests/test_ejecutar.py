@@ -34,8 +34,10 @@ class _StubExecutor:
         self.verify_command_recibido: str | None = "__no_llamado__"
         _StubExecutor.ultima_instancia = self
 
-    def execute(self, plan, *, allow_commands=False, branch=None, verify_command=None):
+    def execute(self, plan, *, allow_commands=False, branch=None, verify_command=None,
+                allow_open_decisions=False):
         self.verify_command_recibido = verify_command
+        self.allow_open_decisions_recibido = allow_open_decisions
         return ExecutionOutcome(
             branch=branch or "devvating/test",
             backend=self.backend.name,
@@ -65,6 +67,42 @@ def _con_verificacion(git_repo, comando: str = "pytest -q"):
     (git_repo / ".devvating.json").write_text(
         json.dumps({"verificacion": comando}), encoding="utf-8"
     )
+
+
+def _transcript_con_decision(tmp_path, crucial=True):
+    p = tmp_path / "t.json"
+    p.write_text(json.dumps({
+        "topic": {"prompt": "tema"}, "synthesis": "un plan",
+        "decisiones": [{"pregunta": "¿A o B?", "crucial": crucial, "resuelta": False}],
+    }), encoding="utf-8")
+    return p
+
+
+class TestGateDecisionesCLI:
+    def test_bloquea_sin_flag_y_no_ejecuta(self, tmp_path, monkeypatch):
+        _preparar(monkeypatch, respuestas=[])  # ni siquiera debe llegar a aprobar
+        rc = ejecutar.main(
+            ["--repo", str(tmp_path), "--from-transcript", str(_transcript_con_decision(tmp_path))]
+        )
+        assert rc == 1
+        assert _StubExecutor.ultima_instancia is None  # nunca se ejecutó
+
+    def test_con_flag_fuerza_y_pasa_allow_open_decisions(self, tmp_path, monkeypatch):
+        _preparar(monkeypatch, respuestas=[])
+        rc = ejecutar.main(
+            ["--repo", str(tmp_path), "--from-transcript",
+             str(_transcript_con_decision(tmp_path)), "--yes", "--allow-open-decisions"]
+        )
+        assert rc == 0
+        assert _StubExecutor.ultima_instancia.allow_open_decisions_recibido is True
+
+    def test_decision_no_crucial_no_bloquea(self, tmp_path, monkeypatch):
+        _preparar(monkeypatch, respuestas=[])
+        rc = ejecutar.main(
+            ["--repo", str(tmp_path), "--yes", "--from-transcript",
+             str(_transcript_con_decision(tmp_path, crucial=False))]
+        )
+        assert rc == 0 and _StubExecutor.ultima_instancia is not None
 
 
 class TestConfirmacionDeVerificar:

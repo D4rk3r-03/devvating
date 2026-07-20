@@ -10,6 +10,7 @@ from devvating.executor import (
     ExecutionPlan,
     Executor,
     ExecutorError,
+    decisiones_crucial_sin_resolver,
 )
 
 PLAN = ExecutionPlan(text="Añade una línea a hola.txt", title="demo plan")
@@ -79,6 +80,45 @@ class VerifyBackend:
         if self.llamadas >= 2 and self.corrige:
             (p / "arreglado.txt").write_text("ok\n", encoding="utf-8")
         return 0, "ok"
+
+
+class TestDecisionesCrucialSinResolver:
+    def test_lee_dicts_del_transcript(self):
+        decisiones = [
+            {"pregunta": "¿A o B?", "crucial": True, "resuelta": False},
+            {"pregunta": "resuelta", "crucial": True, "resuelta": True},
+            {"pregunta": "no crucial", "crucial": False},
+        ]
+        assert decisiones_crucial_sin_resolver(decisiones) == ["¿A o B?"]
+
+    def test_none_o_vacio_no_falla(self):
+        assert decisiones_crucial_sin_resolver(None) == []
+        assert decisiones_crucial_sin_resolver([]) == []
+
+
+class TestGateDecisiones:
+    def _plan_con_pendiente(self):
+        return ExecutionPlan(
+            text="plan", title="demo", decisiones_pendientes=["¿A o B?"]
+        )
+
+    def test_bloquea_ejecucion_con_decision_crucial_abierta(self, git_repo):
+        ex = Executor(str(git_repo), WriterBackend())
+        with pytest.raises(ExecutorError, match="decisiones cruciales sin resolver"):
+            ex.execute(self._plan_con_pendiente())
+        # No dejó rama colgada: sigue en la base, nada en staging.
+        assert gitutil.current_branch(str(git_repo)) == "main"
+        assert not gitutil.staged_changed_files(str(git_repo))
+
+    def test_override_permite_forzar(self, git_repo):
+        ex = Executor(str(git_repo), WriterBackend())
+        out = ex.execute(self._plan_con_pendiente(), allow_open_decisions=True)
+        assert out.returncode == 0 and out.changed_files
+
+    def test_plan_sin_pendientes_no_se_bloquea(self, git_repo):
+        ex = Executor(str(git_repo), WriterBackend())
+        out = ex.execute(PLAN)  # decisiones_pendientes vacío por defecto
+        assert out.changed_files
 
 
 class TestVerificacion:

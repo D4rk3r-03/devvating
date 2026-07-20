@@ -29,7 +29,13 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 from .appconfig import ProjectConfig
-from .executor import ClaudeCodeBackend, Executor, ExecutionPlan, ExecutorError
+from .executor import (
+    ClaudeCodeBackend,
+    Executor,
+    ExecutionPlan,
+    ExecutorError,
+    decisiones_crucial_sin_resolver,
+)
 
 
 def _load_plan(args: argparse.Namespace) -> ExecutionPlan:
@@ -39,7 +45,10 @@ def _load_plan(args: argparse.Namespace) -> ExecutionPlan:
         if not text:
             raise ExecutorError("El transcript no contiene una síntesis.")
         title = data.get("topic", {}).get("prompt", "plan")
-        return ExecutionPlan(text=text, title=title)
+        return ExecutionPlan(
+            text=text, title=title,
+            decisiones_pendientes=decisiones_crucial_sin_resolver(data.get("decisiones")),
+        )
     if args.plan_file:
         return ExecutionPlan(
             text=Path(args.plan_file).read_text(encoding="utf-8").strip(),
@@ -66,6 +75,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--yes", action="store_true", help="Omite la confirmación.")
     parser.add_argument(
+        "--allow-open-decisions",
+        action="store_true",
+        help="Fuerza la ejecución aunque el plan tenga decisiones cruciales sin "
+             "resolver. Opt-in explícito (como --allow-commands): normalmente el "
+             "vocero cierra las decisiones antes de ejecutar.",
+    )
+    parser.add_argument(
         "--verificar",
         action="store_true",
         help="Fase 5 (M9): tras aplicar el plan, corre el comando de "
@@ -88,6 +104,24 @@ def main(argv: list[str] | None = None) -> int:
     console.rule("[bold]DEVVATING · Ejecución (M3)")
     console.print(f"[dim]modelo ejecutor: {backend.model}[/dim]")
     console.print(Panel(Markdown(plan.text), title="[green]Plan a ejecutar", border_style="green"))
+
+    # Gate de decisiones: aviso claro antes de que el vocero apruebe.
+    if plan.decisiones_pendientes:
+        pendientes = "\n".join(f"  • {p}" for p in plan.decisiones_pendientes)
+        if args.allow_open_decisions:
+            console.print(
+                "[bold red]⚠ --allow-open-decisions: el plan tiene decisiones "
+                "cruciales SIN resolver y se ejecutará igual (el ejecutor "
+                f"resolverá la ambigüedad en silencio):\n{pendientes}[/bold red]"
+            )
+        else:
+            console.print(
+                "[red]El plan tiene decisiones cruciales sin resolver; ciérralas "
+                f"antes de ejecutar:\n{pendientes}\n[/red]"
+                "[dim]Resuélvelas (aún no hay UI de cierre en CLI) o fuerza con "
+                "--allow-open-decisions bajo tu riesgo.[/dim]"
+            )
+            return 1
 
     # Fase 3 — arbitraje del vocero.
     if args.allow_commands:
@@ -145,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome = executor.execute(
             plan, allow_commands=args.allow_commands, branch=args.branch,
             verify_command=verify_command,
+            allow_open_decisions=args.allow_open_decisions,
         )
     except ExecutorError as exc:
         console.print(f"[red]{exc}[/red]")

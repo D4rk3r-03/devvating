@@ -15,6 +15,7 @@ Todo en SOLO LECTURA: los agentes solo disponen de read_file.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -73,6 +74,106 @@ def _parse_verdict(text: str) -> tuple[str, str | None]:
     return clean, verdict
 
 
+# Bloque de DECISIONES del vocero (plan del debate "que el vocero pueda resolver
+# las decisiones abiertas"). Va SOLO en la síntesis (no en la réplica: con 6 CLIs
+# de terceros duplicar la superficie de parseo degradaría el veredicto de una
+# línea). A diferencia del veredicto —un booleano que un regex basta—, este
+# bloque es JSON anidado; se localiza por marcador y se corta con raw_decode, que
+# respeta strings y anidamiento. Fallback seguro: cualquier fallo → lista vacía
+# (mismo espíritu que None en _parse_verdict; nunca rompe el debate).
+_DECISIONES_MARK_RE = re.compile(r'\{\s*"decisiones"\s*:', re.IGNORECASE)
+# Fragmento textual citado en 'contra', entre comillas angulares/curvas/rectas.
+_CITA_RE = re.compile(r'[«“"]([^»”"]{3,})[»”"]')
+_SIN_CONTRA_RE = re.compile(r"(?i)sin contraargumento")
+
+
+@dataclass
+class Decision:
+    """Una decisión que el plan deja al vocero, con opciones y una recomendada.
+
+    `contra`: mejor argumento contra la recomendada, con un fragmento textual
+    citado. `contra_en_debate` es una señal BLANDA (no bloquea ni borra): False
+    si ese fragmento no se localiza en la transcripción — la UI lo marca ⚠ para
+    avisar que la cita no se pudo verificar, sin degradar el texto.
+    `resuelta`/`eleccion`: los llena la resolución del vocero (fase F2), no el
+    parser; aquí nacen sin resolver.
+    """
+
+    id: str
+    pregunta: str
+    opciones: list[str] = field(default_factory=list)
+    recomendada: str = ""
+    crucial: bool = False
+    contra: str = ""
+    contra_en_debate: bool = True
+    resuelta: bool = False
+    eleccion: str = ""
+
+
+def _normalizar(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _cita_localizada(contra: str, transcript_norm: str) -> bool:
+    """True si el 'contra' es verificable: o declara honestamente que no hubo
+    contraargumento, o cita un fragmento textual que aparece en la transcripción."""
+    if not contra.strip() or _SIN_CONTRA_RE.search(contra):
+        return True  # ausencia declarada: honesta, no sospechosa
+    fragmentos = [f for f in _CITA_RE.findall(contra) if len(f.strip()) >= 8]
+    if not fragmentos:
+        return False  # afirma un contra pero sin fragmento verificable
+    return any(_normalizar(f) in transcript_norm for f in fragmentos)
+
+
+def _parse_decisiones(text: str) -> tuple[str, list[Decision]]:
+    """Extrae el bloque de decisiones y lo quita del texto visible.
+
+    Cualquier problema (sin bloque, JSON roto, forma inesperada) → ([], texto
+    intacto): el fallback seguro del contrato.
+    """
+    m = _DECISIONES_MARK_RE.search(text)
+    if not m:
+        return text.strip(), []
+    inicio = m.start()
+    try:
+        obj, fin = json.JSONDecoder().raw_decode(text, inicio)
+    except ValueError:
+        return text.strip(), []
+    crudas = obj.get("decisiones") if isinstance(obj, dict) else None
+    if not isinstance(crudas, list):
+        return text.strip(), []
+    decisiones: list[Decision] = []
+    for d in crudas:
+        if not isinstance(d, dict):
+            continue
+        opciones = [str(o) for o in d.get("opciones", []) if isinstance(o, (str, int, float))]
+        decisiones.append(Decision(
+            id=str(d.get("id", "")),
+            pregunta=str(d.get("pregunta", "")),
+            opciones=opciones,
+            recomendada=str(d.get("recomendada", "")),
+            crucial=bool(d.get("crucial", False)),
+            contra=str(d.get("contra", "")),
+        ))
+    clean = (text[:inicio] + text[fin:]).strip()
+    return clean, decisiones
+
+
+def _verificar_contra(decisiones: list[Decision], transcripcion: str) -> None:
+    """Marca blanda por decisión: fija `contra_en_debate` sin bloquear ni borrar."""
+    norm = _normalizar(transcripcion)
+    for d in decisiones:
+        d.contra_en_debate = _cita_localizada(d.contra, norm)
+
+
+def _estado_de(session: "DebateSession") -> str:
+    """Estado nominal: pendiente_decision manda sobre la convergencia — un plan
+    con una decisión crucial abierta no está cerrado aunque los agentes convergieran."""
+    if any(d.crucial and not d.resuelta for d in session.decisiones):
+        return "pendiente_decision"
+    return "convergido" if session.converged else "abierto"
+
+
 @dataclass
 class DebateTopic:
     prompt: str
@@ -99,6 +200,11 @@ class DebateSession:
     deep_mode: bool = False
     synthesis: str = ""
     synthesizer: str = ""
+    # Decisiones que la síntesis deja al vocero (bloque JSON despojado del texto)
+    # y el estado nominal resultante: "convergido" / "abierto" / "pendiente_decision"
+    # (este último si hay alguna decisión crucial sin resolver).
+    decisiones: list[Decision] = field(default_factory=list)
+    estado: str = "abierto"
     # Totales por agente + "total" global, derivados de turns al final (§13).
     usage_totals: dict[str, TurnUsage] = field(default_factory=dict)
 
@@ -372,9 +478,17 @@ class Orchestrator:
             session.turns.append(
                 Turn(session.rounds_run, "sintesis", synth.name, text, usage=self._usage_de(synth))
             )
-        session.synthesis = text
+        # Despojar el bloque de decisiones del texto visible (como el veredicto
+        # en la réplica). El mismo turno guarda ya el texto limpio, para que el
+        # reporte y una reanudación no arrastren el JSON crudo.
+        clean, decisiones = _parse_decisiones(text)
+        session.turns[-1].text = clean
+        session.synthesis = clean
         session.synthesizer = synth.name
-        self._on_event("sintesis_fin", synth.name, text)
+        session.decisiones = decisiones
+        _verificar_contra(decisiones, self._transcript_text(session))
+        session.estado = _estado_de(session)
+        self._on_event("sintesis_fin", synth.name, clean)
 
         session.usage_totals = self._totalizar(session)
         return session

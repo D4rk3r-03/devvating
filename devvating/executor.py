@@ -29,6 +29,28 @@ class ExecutorError(RuntimeError):
 class ExecutionPlan:
     text: str
     title: str = "plan"
+    # Preguntas de las decisiones cruciales que el vocero aún no resolvió. Si no
+    # está vacío, el gate bloquea la ejecución: un plan con una ambigüedad
+    # crucial abierta no está cerrado, y aplicarlo hace que el ejecutor la
+    # resuelva en silencio (el bucle que motivó esta feature).
+    decisiones_pendientes: list[str] = field(default_factory=list)
+
+
+def decisiones_crucial_sin_resolver(decisiones) -> list[str]:
+    """Preguntas de las decisiones crucial que faltan por resolver — la
+    condición del gate. Acepta dicts (del transcript) o dataclasses Decision,
+    para ser la única verdad que compartan el Executor y el Hub."""
+    preguntas: list[str] = []
+    for d in decisiones or []:
+        if isinstance(d, dict):
+            crucial, resuelta, pregunta = d.get("crucial"), d.get("resuelta"), d.get("pregunta", "")
+        else:
+            crucial = getattr(d, "crucial", False)
+            resuelta = getattr(d, "resuelta", False)
+            pregunta = getattr(d, "pregunta", "")
+        if crucial and not resuelta:
+            preguntas.append(str(pregunta))
+    return preguntas
 
 
 @dataclass
@@ -150,10 +172,22 @@ class Executor:
         branch: str | None = None,
         require_clean: bool = True,
         verify_command: str | None = None,
+        allow_open_decisions: bool = False,
     ) -> ExecutionOutcome:
         if not gitutil.is_git_repo(self.repo):
             raise ExecutorError(
                 f"'{self.repo}' no es un repositorio git. Inicialízalo con `git init`."
+            )
+        # Gate de decisiones (una sola verdad; el Hub la traduce a 422): no
+        # ejecutar un plan con una decisión crucial abierta. Va antes de crear
+        # rama, así no deja ninguna colgada.
+        if plan.decisiones_pendientes and not allow_open_decisions:
+            preguntas = "; ".join(p for p in plan.decisiones_pendientes if p)
+            raise ExecutorError(
+                "El plan tiene decisiones cruciales sin resolver; ciérralas antes "
+                "de ejecutar (si no, el ejecutor aplicaría la ambigüedad en "
+                f"silencio). Pendientes: {preguntas}. Resuélvelas y cierra el plan, "
+                "o fuerza bajo tu riesgo (--allow-open-decisions)."
             )
         if require_clean and not gitutil.is_clean(self.repo):
             raise ExecutorError(

@@ -40,7 +40,13 @@ from . import agentes as banco
 from . import gitutil, reporte, roles, rotation
 from .config import Config
 from .debate import _load_partial_session, _save_transcript
-from .executor import ClaudeCodeBackend, ExecutionPlan, Executor, ExecutorError
+from .executor import (
+    ClaudeCodeBackend,
+    ExecutionPlan,
+    Executor,
+    ExecutorError,
+    decisiones_crucial_sin_resolver,
+)
 from .orchestrator import (
     DebateAbortedError,
     DebateCancelledError,
@@ -197,7 +203,10 @@ def _ejecucion_worker(
     ver tests/test_hub.py::test_verificacion_de_devvating_json_no_corre_desde_el_hub.
     """
     try:
-        plan = ExecutionPlan(text=config["plan"], title=config.get("titulo", "plan"))
+        plan = ExecutionPlan(
+            text=config["plan"], title=config.get("titulo", "plan"),
+            decisiones_pendientes=config.get("decisiones_pendientes", []),
+        )
         ejecutor = Executor(
             config["repo"],
             backend or ClaudeCodeBackend(),
@@ -205,7 +214,10 @@ def _ejecucion_worker(
                 {"tipo": "ejecucion_evento", "evento": ev, "valor": val}
             ),
         )
-        resultado = ejecutor.execute(plan, allow_commands=False)
+        resultado = ejecutor.execute(
+            plan, allow_commands=False,
+            allow_open_decisions=config.get("forzar_decisiones", False),
+        )
     except (ExecutorError, KeyError) as exc:
         mensaje = str(exc)
         if "sin confirmar" in mensaje:
@@ -428,6 +440,18 @@ def crear_app(
         plan = str(data.get("synthesis", "")).strip()
         if not plan:
             raise HTTPException(422, "El transcript no contiene una síntesis.")
+        # Gate de decisiones (misma verdad que el Executor, traducida a 422): no
+        # ejecutar en seco un plan con una decisión crucial abierta. El vocero
+        # puede forzar (opt-in), análogo a --allow-open-decisions del CLI.
+        pendientes = decisiones_crucial_sin_resolver(data.get("decisiones"))
+        forzar = bool(cuerpo.get("forzar_decisiones"))
+        if pendientes and not forzar:
+            raise HTTPException(
+                422,
+                "El plan tiene decisiones cruciales sin resolver; ciérralas antes "
+                "de ejecutar (o fuerza bajo tu riesgo). Pendientes: "
+                + "; ".join(p for p in pendientes if p),
+            )
         # Confinado al repo servido: NO se aplica un plan en una ruta arbitraria
         # del cuerpo (agujero de escritura remota vía navegador — auto-auditoría).
         repo_objetivo = repo
@@ -437,7 +461,8 @@ def crear_app(
             target=_ejecucion_worker,
             args=(
                 {"plan": plan, "repo": repo_objetivo,
-                 "titulo": data.get("topic", {}).get("prompt", "plan")},
+                 "titulo": data.get("topic", {}).get("prompt", "plan"),
+                 "decisiones_pendientes": pendientes, "forzar_decisiones": forzar},
                 _emitir,
                 backend_ejecucion,
             ),
