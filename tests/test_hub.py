@@ -415,6 +415,22 @@ class _BackendFallido:
         return 1, "boom: el plan reventó"
 
 
+class _BackendContador:
+    """Como _BackendEscritor, pero cuenta llamadas (detecta la corrección de fase 5)."""
+
+    name = "stub-contador"
+
+    def __init__(self) -> None:
+        self.llamadas = 0
+
+    def run(self, prompt, cwd, allow_commands):
+        from pathlib import Path
+
+        self.llamadas += 1
+        Path(cwd, "hola.txt").write_text("hola\nmundo-hub\n", encoding="utf-8")
+        return 0, "ok"
+
+
 class TestEjecucion:
     @staticmethod
     def _ignorar_transcripts(repo):
@@ -456,6 +472,32 @@ class TestEjecucion:
                         pytest.fail(msg["mensaje"])
             assert fin and fin["rama"].startswith("devvating/")
             assert fin["archivos"] == ["hola.txt"] and "mundo-hub" in fin["diff"]
+
+    def test_verificacion_de_devvating_json_no_corre_desde_el_hub(self, git_repo):
+        # Alcance diferido (M9): el Hub no expone verify_command, a diferencia
+        # de la CLI (ejecutar.py --verificar). Ancla el comportamiento actual
+        # como deliberado, no como hueco de seguridad: un .devvating.json con
+        # 'verificacion' configurada en el repo objetivo NUNCA dispara esa
+        # fase desde el Hub, ni siquiera si el comando fallaría.
+        (git_repo / ".devvating.json").write_text(
+            json.dumps({"verificacion": "false"}), encoding="utf-8"
+        )
+        import subprocess
+        subprocess.run(["git", "add", ".devvating.json"], cwd=git_repo, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-m", "config"], cwd=git_repo, check=True,
+                       capture_output=True)
+        self._ignorar_transcripts(git_repo)
+        backend = _BackendContador()
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=backend)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            fin = self._ejecutar_hasta_fin(c)
+        # Si el Hub leyera y corriera 'verificacion', al fallar dispararía la
+        # corrección acotada (fase 5) y el backend se invocaría una 2ª vez.
+        assert backend.llamadas == 1
+        assert fin["returncode"] == 0
 
     def _ejecutar_hasta_fin(self, c):
         """Debate + ejecuta con el backend escritor; devuelve el evento fin."""

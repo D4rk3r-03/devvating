@@ -182,6 +182,11 @@ def _ejecucion_worker(
     Salvaguardas del plan del Hub: SIEMPRE sin comandos (allow_commands es
     opt-in exclusivo de la CLI), el Executor exige árbol limpio y deja los
     cambios en staging — el Hub solo muestra; el commit es del vocero.
+
+    Alcance diferido (M9): no pasa `verify_command` a `Executor.execute` — la
+    fase 5 (verificación) solo existe desde la CLI (`ejecutar.py --verificar`,
+    con su confirmación aparte). Omisión deliberada, no hueco de seguridad:
+    ver tests/test_hub.py::test_verificacion_de_devvating_json_no_corre_desde_el_hub.
     """
     try:
         plan = ExecutionPlan(text=config["plan"], title=config.get("titulo", "plan"))

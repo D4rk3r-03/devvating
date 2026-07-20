@@ -83,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[red]No se pudo cargar el plan: {exc}[/red]")
         return 1
 
+    backend = ClaudeCodeBackend(model=args.model)
+
     console.rule("[bold]DEVVATING · Ejecución (M3)")
     console.print(f"[dim]modelo ejecutor: {backend.model}[/dim]")
     console.print(Panel(Markdown(plan.text), title="[green]Plan a ejecutar", border_style="green"))
@@ -133,7 +135,6 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 console.print("Verificación omitida por el vocero.")
 
-    backend = ClaudeCodeBackend(model=args.model)
     executor = Executor(
         args.repo,
         backend,
