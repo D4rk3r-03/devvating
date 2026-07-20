@@ -249,11 +249,16 @@ class StreamingStub(StubAdapter):
 
 class TestStreaming:
     def test_orquestador_fija_on_delta_solo_en_los_que_soportan(self):
+        # `visto` captura si el callback estaba puesto DURANTE el turno; tras el
+        # run se limpia (ver test_on_delta_se_limpia_al_terminar).
+        visto = {}
         a = StreamingStub("claude", ["postura A", 'r {"convergencia": true}', "síntesis"])
         b = StubAdapter("gemini", ["postura B", 'r {"convergencia": true}'])
+        orig = a.converse
+        a.converse = lambda s, p, r: (visto.__setitem__("callable", callable(a.on_delta)), orig(s, p, r))[1]
         orch = Orchestrator(a, b, repo_root=".")
         orch.run(TOPIC, max_rounds=1)
-        assert callable(a.on_delta)  # se lo fijó el orquestador
+        assert visto["callable"] is True   # el orquestador se lo fijó para el turno
         assert not hasattr(b, "on_delta")  # al no soportar, no se toca
 
     def test_los_deltas_llegan_como_eventos_delta_a_la_ui(self):
@@ -278,3 +283,23 @@ class TestStreaming:
         orch = Orchestrator(a, b, repo_root=".")
         s = orch.run(TOPIC, max_rounds=1)
         assert s.converged and s.synthesis == "síntesis final"
+
+    def test_on_delta_se_limpia_al_terminar(self):
+        # Regresión: el callback no debe sobrevivir al debate apuntando a un
+        # on_event ya cerrado (el adaptador se reusa en el Hub).
+        a = StreamingStub("claude", ["A0", 'A1 {"convergencia": true}', "síntesis"])
+        b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
+        orch = Orchestrator(a, b, repo_root=".")
+        orch.run(TOPIC, max_rounds=1)
+        assert a.on_delta is None
+
+    def test_on_delta_se_limpia_tambien_si_el_debate_aborta(self):
+        from devvating.adapters.base import AgentError
+        from devvating.orchestrator import DebateAbortedError
+
+        a = StreamingStub("claude", [AgentError("boom")])
+        b = StubAdapter("gemini", ["B0"])
+        orch = Orchestrator(a, b, repo_root=".")
+        with pytest.raises(DebateAbortedError):
+            orch.run(TOPIC, max_rounds=1)
+        assert a.on_delta is None

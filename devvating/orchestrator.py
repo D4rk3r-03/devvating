@@ -210,6 +210,13 @@ class Orchestrator:
             # parcial — los turnos completados nunca se pierden (plan §13).
             session.usage_totals = self._totalizar(session)
             raise DebateAbortedError(session, exc) from exc
+        finally:
+            # No dejar el callback de streaming colgando: el adaptador puede
+            # sobrevivir a esta sesión (en el Hub se reusa el objeto), y un
+            # on_delta apuntando a un on_event ya cerrado emitiría al vacío.
+            for agent in self.agents:
+                if getattr(agent, "soporta_streaming", False):
+                    agent.on_delta = None
 
     def _delta_cb(self, nombre: str) -> Callable[[str], None]:
         """Callback de streaming para un agente: cada fragmento va a la UI como

@@ -146,6 +146,32 @@ class TestClaudeCliAdapter:
         with pytest.raises(CliAdapterError, match="No se encontró el binario"):
             adapter.converse("SYS", "P", REG)
 
+    def test_hijo_que_cierra_stdout_sin_morir_no_cuelga(self, fake_bin, tmp_path, monkeypatch):
+        # Regresión: `proc.wait()` sin tope colgaba para siempre si el hijo
+        # cerraba stdout (EOF → _FIN) pero seguía vivo. Ahora se espera un tope
+        # corto y, si no muere, se mata el grupo; el result ya está capturado.
+        monkeypatch.setattr("devvating.adapters.cli._ESPERA_CIERRE", 0.3)
+        script = f"echo '{_result(result='pese al hijo colgado')}'\nexec 1>&-\nsleep 30"
+        adapter = ClaudeCliAdapter(binary=fake_bin("claude", script), cwd=str(tmp_path))
+        inicio = time.monotonic()
+        assert adapter.converse("SYS", "P", REG) == "pese al hijo colgado"
+        assert time.monotonic() - inicio < 10  # no esperó los 30s del sleep
+
+    def test_stderr_completo_en_el_fallo(self, fake_bin, tmp_path):
+        # Regresión: leer err_partes sin drenar el hilo de stderr truncaba el
+        # diagnóstico justo en el caso de fallo. Debe llegar entero.
+        script = (
+            "echo 'linea de error 1' >&2\n"
+            "echo 'linea de error 2' >&2\n"
+            "echo 'ultima linea con el detalle clave' >&2\n"
+            "exit 7"
+        )
+        adapter = ClaudeCliAdapter(binary=fake_bin("claude", script), cwd=str(tmp_path))
+        with pytest.raises(CliAdapterError) as info:
+            adapter.converse("SYS", "P", REG)
+        assert "código 7" in str(info.value)
+        assert "ultima linea con el detalle clave" in str(info.value)
+
     def test_cancelacion_a_mitad_de_stream_mata_el_subprocess(self, fake_bin, tmp_path):
         # El cambio a lecturas incrementales alteró la mecánica de _matar_grupo
         # (ya no drena con communicate porque un hilo lee stdout). Regresión: al

@@ -45,6 +45,11 @@ _TRANSITORIO_RE = re.compile(
 _LIMITE_SESION_RE = re.compile(r"(?i)session limit")
 _RESETS_RE = re.compile(r"(?i)resets\s+([^\n·]+)")
 
+# Tope corto para cerrar un stream: tras el EOF de stdout, cuánto esperar a que
+# el proceso muera (o el hilo de stderr drene) antes de matar el grupo. El texto
+# final ya está parseado a esta altura; es solo higiene de cierre.
+_ESPERA_CIERRE = 5
+
 
 def clasificar_fallo(detalle: str, prefijo: str) -> AgentError:
     """Mapea el texto de error de un CLI a la taxonomía (plan de resiliencia).
@@ -193,8 +198,10 @@ def _run_stream(
         except (ValueError, OSError):  # pipe cerrado al matar el grupo
             pass
 
-    threading.Thread(target=_leer_stdout, daemon=True).start()
-    threading.Thread(target=_leer_stderr, daemon=True).start()
+    hilo_out = threading.Thread(target=_leer_stdout, daemon=True)
+    hilo_err = threading.Thread(target=_leer_stderr, daemon=True)
+    hilo_out.start()
+    hilo_err.start()
 
     def _cancelado_o_timeout() -> None:
         if cancel_event is not None and cancel_event.is_set():
@@ -234,7 +241,19 @@ def _run_stream(
                     if texto:
                         on_delta(texto)
 
-    proc.wait()
+    # El _FIN dice que stdout llegó a EOF, no que el proceso murió: un hijo que
+    # cierra stdout pero sigue vivo colgaría `proc.wait()` para siempre, justo
+    # tras haber honrado timeout/cancel todo el lazo. Esperar con tope y, si no
+    # cierra, matar el grupo. El `resultado` ya está capturado (el lector puso
+    # _FIN tras drenar todo stdout), así que matar aquí no pierde salida.
+    try:
+        proc.wait(timeout=_ESPERA_CIERRE)
+    except subprocess.TimeoutExpired:
+        _terminar_grupo(proc)
+        proc.wait()
+    # Drenar el hilo de stderr antes de leer err_partes, o el diagnóstico del
+    # fallo sale truncado (el hilo puede no haber terminado de anexar sus líneas).
+    hilo_err.join(timeout=_ESPERA_CIERRE)
     return proc.returncode, resultado, "".join(err_partes)
 
 
@@ -284,12 +303,18 @@ class ClaudeCliAdapter:
             self.build_argv(system, prompt), self.cwd, self.timeout,
             "Claude Code", self.on_delta, self.cancel_event,
         )
-        if returncode != 0:
-            detalle = (err or (data or {}).get("result", "") or "").strip()[:500]
-            raise clasificar_fallo(detalle, f"claude -p salió con código {returncode}")
+        # El mensaje 'result' es la autoridad del turno: si llegó, el turno
+        # cerró. Un returncode distinto de 0 puede venir de la limpieza del
+        # stream (un hijo colgado que hubo que matar tras capturar el result),
+        # y ese código de higiene NO debe invalidar un turno ya completo. Por
+        # eso se mira el result antes que el returncode.
         if data is None:
+            detalle = (err or "").strip()[:500]
+            if returncode not in (0, None):
+                raise clasificar_fallo(detalle, f"claude -p salió con código {returncode}")
             raise CliAdapterError(
                 "La salida stream-json de claude -p no incluyó un mensaje 'result'."
+                + (f" stderr: {detalle}" if detalle else "")
             )
         if data.get("is_error"):
             # El JSON trae la clasificación fina: texto del error + status API.
