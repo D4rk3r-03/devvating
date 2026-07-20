@@ -130,6 +130,24 @@ class TestWorker:
         assert "par inválido" in eventos[0]["mensaje"]
 
 
+def _transcript_completo(carpeta, nombre):
+    """Un debate de 1 ronda ya terminado, con una decisión resuelta."""
+    carpeta.mkdir(exist_ok=True)
+    (carpeta / nombre).write_text(json.dumps({
+        "topic": {"prompt": "¿tema original?", "context_hint": ""},
+        "turns": [
+            {"round": 0, "phase": "propuesta", "agent": "claude", "text": "P claude", "verdict": None},
+            {"round": 0, "phase": "propuesta", "agent": "gemini", "text": "P gemini", "verdict": None},
+            {"round": 1, "phase": "replica", "agent": "claude", "text": "R claude", "verdict": "no"},
+            {"round": 1, "phase": "replica", "agent": "gemini", "text": "R gemini", "verdict": "no"},
+            {"round": 1, "phase": "sintesis", "agent": "claude", "text": "síntesis abierta", "verdict": None},
+        ],
+        "rounds_run": 1, "converged": False, "synthesizer": "claude",
+        "decisiones": [{"id": "d1", "pregunta": "¿A o B?", "crucial": True,
+                        "resuelta": True, "eleccion": "A (elegida por el vocero)"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+
 @pytest.fixture
 def cliente(tmp_path):
     app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
@@ -778,4 +796,61 @@ class TestEjecucion:
         with TestClient(app) as c:
             c.headers["X-Devvating-CSRF"] = app.state.csrf_token
             r = c.post("/api/ejecutar", json={"transcript": "vacio.json"})
+            assert r.status_code == 422
+
+
+class TestCierrePlan:
+    def test_reusa_turnos_y_corre_una_ronda_con_las_decisiones(self, tmp_path):
+        # Fabrica del cierre: los turnos 0 y 1 se reusan del transcript; los
+        # stubs solo responden la ronda NUEVA (réplica 2 + síntesis cerrada).
+        cerrada = "## Plan propuesto\nplan cerrado\n\n" + '{"decisiones":[]}'
+
+        def fabrica(nombres, cfg, repo):
+            a = StubAdapter("claude", ['R2 A {"convergencia": true}', cerrada])
+            b = StubAdapter("gemini", ['R2 B {"convergencia": true}', cerrada])
+            fabrica.a, fabrica.b = a, b
+            return a, b
+
+        app = crear_app(repo=str(tmp_path), fabrica_par=fabrica)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            nombre = "20260720-100000-original.json"
+            _transcript_completo(tmp_path / "transcripts", nombre)
+            antes = set(c.get("/api/transcripts").json()["transcripts"])
+            r = c.post("/api/cerrar-plan",
+                       json={"transcript": nombre, "agentes": ["claude-cli", "gemini-cli"]})
+            assert r.status_code == 202
+            for _ in range(100):
+                if not c.get("/api/estado").json()["corriendo"]:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("la ronda de cierre no terminó")
+
+        # La decisión resuelta llegó como restricción a la ronda nueva.
+        prompt_replica2 = fabrica.a.llamadas[0][1]
+        assert "DECISIONES YA TOMADAS" in prompt_replica2
+        assert "A (elegida por el vocero)" in prompt_replica2
+
+        # Salió un transcript nuevo: 2 rondas, plan cerrado (sin decisiones).
+        nuevos = set(c.get("/api/transcripts").json()["transcripts"]) - antes
+        assert len(nuevos) == 1
+        data = c.get(f"/api/transcripts/{nuevos.pop()}").json()
+        assert data["rounds_run"] == 2
+        assert data["synthesis"].startswith("## Plan propuesto")
+        assert data["decisiones"] == [] and data["estado"] == "convergido"
+        # Reusó los turnos viejos: la propuesta original sigue ahí.
+        assert any(t["text"] == "P claude" for t in data["turns"])
+
+    def test_transcript_sin_turnos_da_422(self, tmp_path):
+        app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            nombre = "20260720-110000-vacio.json"
+            carpeta = tmp_path / "transcripts"
+            carpeta.mkdir(exist_ok=True)
+            (carpeta / nombre).write_text(json.dumps(
+                {"topic": {"prompt": "t"}, "turns": [], "rounds_run": 0}), encoding="utf-8")
+            r = c.post("/api/cerrar-plan",
+                       json={"transcript": nombre, "agentes": ["claude-cli", "gemini-cli"]})
             assert r.status_code == 422

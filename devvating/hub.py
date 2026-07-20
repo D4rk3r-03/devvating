@@ -75,6 +75,25 @@ npm run build</pre>
 </div></body></html>"""
 
 
+def _prompt_cierre(prompt_original: str, decisiones: list[dict]) -> str:
+    """Tema de la ronda de cierre (F3): el original + las decisiones ya tomadas
+    como restricciones fijas, para que el debate produzca un plan CERRADO."""
+    tomadas = [
+        f"- {d.get('pregunta', '')} → {d.get('eleccion', '')}"
+        for d in decisiones
+        if isinstance(d, dict) and str(d.get("eleccion") or "").strip()
+    ]
+    if not tomadas:
+        return prompt_original
+    return (
+        f"{prompt_original}\n\n"
+        "DECISIONES YA TOMADAS POR EL VOCERO (son restricciones FIJAS; no las "
+        "rediscutas, intégralas al plan):\n" + "\n".join(tomadas) + "\n\n"
+        "Produce un PLAN CERRADO que incorpore estas decisiones. No dejes "
+        "decisiones abiertas salvo que surja una genuinamente nueva."
+    )
+
+
 def _debate_worker(
     config: dict,
     emitir: Callable[[dict], None],
@@ -136,12 +155,18 @@ def _debate_worker(
     topic = DebateTopic(prompt=config["tema"], context_hint=config.get("files", ""))
     estado_rotacion = rotation.load(repo)
     rounds = int(config.get("rounds", 2))
+    # La ronda de cierre (F3) fija min_rounds=rounds para forzar la ronda nueva
+    # sin que una convergencia previa reusada corte antes de llegar a ella.
+    min_rounds = config.get("min_rounds")
+    min_rounds = int(min_rounds) if min_rounds is not None else (
+        min(2, rounds) if autodebate else 1
+    )
 
     try:
         session = orch.run(
             topic,
             max_rounds=rounds,
-            min_rounds=min(2, rounds) if autodebate else 1,
+            min_rounds=min_rounds,
             synthesizer_index=estado_rotacion.synthesizer_index(),
             deep_mode=bool(config.get("profundo", False)),
             on_intervention=on_intervention,
@@ -458,6 +483,47 @@ def crear_app(
                 d["crucial"] = bool(r["crucial"])
         ruta.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"ok": True, "pendientes": decisiones_crucial_sin_resolver(data.get("decisiones"))}
+
+    @app.post("/api/cerrar-plan", status_code=202, dependencies=[_csrf])
+    def cerrar_plan(cuerpo: dict) -> dict:
+        """Ronda de cierre (F3): re-sintetiza un debate con las decisiones ya
+        resueltas inyectadas como restricciones fijas, para producir un plan
+        cerrado. Es una reanudación (reusa los turnos pagados) con exactamente
+        UNA ronda nueva; los agentes se re-eligen (no se serializan)."""
+        if app.state.corriendo:
+            raise HTTPException(409, "Ya hay un debate en curso (v1: uno a la vez).")
+        agentes = cuerpo.get("agentes") or []
+        if len(agentes) != 2:
+            raise HTTPException(422, "Elige exactamente 2 agentes del roster.")
+        nombre = str(cuerpo.get("transcript", ""))
+        ruta = _ruta_transcript(nombre)
+        data = json.loads(ruta.read_text(encoding="utf-8"))
+        old_session = _load_partial_session(str(ruta))
+        if not old_session.turns:
+            raise HTTPException(422, "El transcript no tiene turnos que reanudar.")
+        ronda_cierre = old_session.rounds_run + 1
+        tema = _prompt_cierre(old_session.topic.prompt, data.get("decisiones") or [])
+        config = {
+            "tema": tema, "agentes": agentes, "repo": repo,
+            "rounds": ronda_cierre, "min_rounds": ronda_cierre, "profundo": False,
+            "sesgos": [s for s in (cuerpo.get("sesgos") or []) if isinstance(s, str)],
+            "files": old_session.topic.context_hint or "",
+        }
+        app.state.corriendo = True
+        app.state.historial = []
+        app.state.cancelar_event.clear()
+        _emitir({"tipo": "inicio", "config": {
+            "tema": tema, "agentes": agentes, "rounds": ronda_cierre,
+            "profundo": False, "interactivo": False, "sesgos": config["sesgos"],
+            "reanudado": True, "cierre": True,
+        }})
+        threading.Thread(
+            target=_debate_worker,
+            args=(config, _emitir, fabrica_par, _esperar_nota, old_session,
+                  app.state.cancelar_event),
+            daemon=True,
+        ).start()
+        return {"ok": True}
 
     @app.post("/api/ejecutar", status_code=202, dependencies=[_csrf])
     def ejecutar(cuerpo: dict) -> dict:

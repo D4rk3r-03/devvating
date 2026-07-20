@@ -420,6 +420,18 @@ export default function App() {
     else setAviso((await r.json()).detail ?? "No se pudo reanudar el debate.");
   };
 
+  // F3 — ronda de cierre: re-sintetiza con las decisiones ya resueltas como
+  // restricciones fijas, para producir un plan cerrado (una ronda nueva).
+  const cerrarPlan = async (transcript: string) => {
+    setAviso("");
+    const r = await post("/api/cerrar-plan", {
+      transcript, agentes: [parA, parB],
+      sesgos: esAutodebate ? [sesgoA, sesgoB] : [],
+    });
+    if (r.ok) setCorriendo(true);
+    else setAviso((await r.json()).detail ?? "No se pudo cerrar el plan.");
+  };
+
   return (
     <div className="app-container">
       <aside className="sidebar">
@@ -657,6 +669,13 @@ export default function App() {
                   target="_blank" rel="noreferrer" className="ver-reporte">
                   <FileText size={14} /> reporte completo
                 </a>
+                {fin.decisiones && fin.decisiones.length > 0 && (
+                  <button className="cerrar-plan" disabled={corriendo}
+                    onClick={() => cerrarPlan(fin.transcript)}
+                    title="Corre una ronda de cierre que re-sintetiza con tus decisiones ya fijadas, para dejar un plan sin ambigüedades.">
+                    <ListChecks size={14} /> Cerrar plan
+                  </button>
+                )}
                 <button className="ejecutar"
                   disabled={ejecutando || corriendo || decisionesPendientes.length > 0}
                   onClick={() => ejecutarPlan(fin.transcript)}
