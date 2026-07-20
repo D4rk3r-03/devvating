@@ -157,9 +157,23 @@
   font-variant-numeric: tabular-nums;
 }
 .turno.pendiente { align-self: center; animation: pulse 2s infinite; }
+/* Con streaming en vivo la tarjeta ya no pulsa: el texto que crece es la señal
+   de actividad, y el pulso encima marearía. */
+.turno.pendiente:has(.cuerpo.streaming) { animation: none; }
 .pensando { color: var(--text-muted); font-style: italic; font-size: .85rem; }
+.pensando.sin-stream { opacity: .8; }
 .girando { animation: girar 1.2s linear infinite; }
 @keyframes girar { to { transform: rotate(360deg); } }
+
+/* Streaming: cursor que parpadea al final del texto parcial. */
+.cuerpo.streaming { display: inline; }
+.cuerpo.streaming > span:first-child { display: inline; }
+.cursor-stream {
+  display: inline-block; width: .5rem; height: 1rem; margin-left: 1px;
+  vertical-align: text-bottom; background: var(--accent, currentColor);
+  animation: parpadeo 1s steps(2, start) infinite;
+}
+@keyframes parpadeo { to { opacity: 0; } }
 
 /* Markdown dentro de las tarjetas */
 .cuerpo { font-size: .9rem; }

@@ -95,6 +95,14 @@ def _debate_worker(
         emitir({"tipo": "cerrado"})
         return
 
+    # Capacidad de streaming por agente: el front la usa para decidir entre
+    # mostrar los tokens en vivo o el estado explícito "sin vista en vivo"
+    # (degradación por capacidad, no por configuración — plan del streaming).
+    emitir({"tipo": "capacidades", "streaming": {
+        agente_a.name: getattr(agente_a, "soporta_streaming", False),
+        agente_b.name: getattr(agente_b, "soporta_streaming", False),
+    }})
+
     def on_event(evento: str, agente: str, texto: str | None) -> None:
         emitir({"tipo": "evento", "evento": evento, "agente": agente, "texto": texto})
 
@@ -283,7 +291,14 @@ def crear_app(
                     "rama": msg["rama"], "base": msg.get("rama_base", ""),
                     "repo": msg["repo"], "returncode": msg.get("returncode", 0),
                 }
-            app.state.historial.append(msg)
+            # Los deltas de streaming son transitorios (la vista final llega en
+            # el evento *_fin con el texto ya despojado): se difunden a los
+            # clientes conectados pero NO se guardan en el historial, o un
+            # debate largo lo inflaría con miles de fragmentos y un cliente que
+            # reconecta reproduciría turnos a medio escribir en vez del final.
+            es_delta = msg.get("tipo") == "evento" and msg.get("evento") == "delta"
+            if not es_delta:
+                app.state.historial.append(msg)
             for ws in set(app.state.clientes):
                 try:
                     await ws.send_json(msg)

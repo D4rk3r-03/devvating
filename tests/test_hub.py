@@ -18,6 +18,28 @@ def _fabrica_stub(nombres, cfg, repo):
     return a, b
 
 
+class _StreamStub(StubAdapter):
+    """StubAdapter que declara streaming y emite su respuesta como un delta."""
+
+    soporta_streaming = True
+
+    def __init__(self, name, respuestas):
+        super().__init__(name, respuestas)
+        self.on_delta = None
+
+    def converse(self, system, prompt, registry):
+        out = super().converse(system, prompt, registry)
+        if self.on_delta is not None:
+            self.on_delta(out)
+        return out
+
+
+def _fabrica_streaming(nombres, cfg, repo):
+    a = _StreamStub("claude", ["A0", 'A1 {"convergencia": true}', "síntesis del hub"])
+    b = StubAdapter("gemini", ["B0", 'B1 {"convergencia": true}'])
+    return a, b
+
+
 CONFIG = {"tema": "¿tema del hub?", "agentes": ["claude-cli", "gemini-api"], "rounds": 1}
 
 
@@ -59,6 +81,22 @@ class TestWorker:
         fin = next(e for e in eventos if e["tipo"] == "fin")
         assert fin["convergio"] and fin["ronda_convergencia"] == 2
 
+    def test_emite_capacidades_de_streaming_por_agente(self, tmp_path):
+        # El front lo usa para "en vivo" vs "sin vista en vivo". Los stubs no
+        # declaran soporta_streaming → ambos False; con _StreamStub, claude True.
+        eventos: list[dict] = []
+        _debate_worker({**CONFIG, "repo": str(tmp_path)}, eventos.append, _fabrica_stub)
+        cap = next(e for e in eventos if e["tipo"] == "capacidades")
+        assert cap["streaming"] == {"claude": False, "gemini": False}
+
+        eventos2: list[dict] = []
+        _debate_worker({**CONFIG, "repo": str(tmp_path)}, eventos2.append, _fabrica_streaming)
+        cap2 = next(e for e in eventos2 if e["tipo"] == "capacidades")
+        assert cap2["streaming"] == {"claude": True, "gemini": False}
+        # Y los deltas viajan como eventos "delta", solo del agente que emite.
+        deltas = [e for e in eventos2 if e["tipo"] == "evento" and e["evento"] == "delta"]
+        assert deltas and all(d["agente"] == "claude" for d in deltas)
+
     def test_par_invalido_emite_error_y_cierra(self, tmp_path):
         eventos: list[dict] = []
         _debate_worker(
@@ -99,6 +137,29 @@ class TestApi:
         assert len(lista) == 1
         html = c.get(f"/api/transcripts/{lista[0]}/html")
         assert html.status_code == 200 and "¿tema del hub?" in html.text
+
+    def test_deltas_se_difunden_pero_no_quedan_en_el_historial(self, tmp_path):
+        # _difundir excluye los deltas del historial (transitorios): un cliente
+        # que reconecta ve capacidades y los turnos finales, nunca los deltas.
+        app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_streaming)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            assert c.post("/api/debates", json=CONFIG).status_code == 202
+            for _ in range(100):
+                if not c.get("/api/estado").json()["corriendo"]:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("el debate del hub no terminó")
+            with c.websocket_connect("/ws") as ws:
+                historial = ws.receive_json()
+            assert historial["tipo"] == "historial"
+            tipos_evento = [
+                e.get("evento") for e in historial["eventos"] if e["tipo"] == "evento"
+            ]
+            assert "delta" not in tipos_evento          # transitorios, fuera
+            assert "sintesis_fin" in tipos_evento        # el turno final, dentro
+            assert any(e["tipo"] == "capacidades" for e in historial["eventos"])
 
     def test_valida_tema_y_par(self, cliente):
         c, _ = cliente

@@ -14,6 +14,7 @@ type Usage = {
 };
 type Msg =
   | { tipo: "inicio"; config: { tema: string; agentes: string[]; rounds: number; profundo: boolean; interactivo?: boolean; sesgos?: string[] } }
+  | { tipo: "capacidades"; streaming: Record<string, boolean> }
   | { tipo: "evento"; evento: string; agente: string; texto: string | null }
   | { tipo: "fin"; sintesis: string; sintetizador: string; convergio: boolean; ronda_convergencia: number | null; usage: Record<string, Usage>; transcript: string }
   | { tipo: "error"; mensaje: string; resets_at?: string | null; parcial?: string | null }
@@ -50,7 +51,10 @@ const FASES: Record<string, string> = {
 };
 
 // ---------------------------------------------------------- componentes
-function Pendiente({ agente, fase }: { agente: string; fase: string }) {
+function Pendiente(
+  { agente, fase, parcial, streaming }:
+  { agente: string; fase: string; parcial: string; streaming: boolean },
+) {
   const [seg, setSeg] = useState(0);
   useEffect(() => {
     const t = setInterval(() => setSeg((s) => s + 1), 1000);
@@ -67,7 +71,22 @@ function Pendiente({ agente, fase }: { agente: string; fase: string }) {
           <RefreshCw size={13} className="girando" /> {mm}:{ss}
         </span>
       </header>
-      <p className="pensando">pensando sobre el código…</p>
+      {parcial ? (
+        // Tokens en vivo: el texto crudo del stream (puede incluir la marca de
+        // convergencia); al cerrar el turno lo reemplaza el _fin ya despojado.
+        <div className="cuerpo streaming">
+          <span dangerouslySetInnerHTML={md(parcial)} />
+          <span className="cursor-stream" />
+        </div>
+      ) : streaming ? (
+        <p className="pensando">pensando sobre el código…</p>
+      ) : (
+        // Degradación por capacidad: este agente no emite deltas; se avisa en
+        // vez de dejar un vacío ambiguo. El turno llegará completo al terminar.
+        <p className="pensando sin-stream">
+          sin vista en vivo — el turno aparece completo al terminar
+        </p>
+      )}
     </div>
   );
 }
@@ -156,9 +175,10 @@ export default function App() {
   }, []);
 
   // Reducción de mensajes → items del feed + turno pendiente + paneles.
-  const { items, pendiente, config, fin, error, cancelado, intervencion, ejecucion, cierre } = useMemo(() => {
+  const { items, pendiente, capacidades, config, fin, error, cancelado, intervencion, ejecucion, cierre } = useMemo(() => {
     const items: Item[] = [];
-    let pendiente: { agente: string; fase: string } | null = null;
+    let pendiente: { agente: string; fase: string; parcial: string } | null = null;
+    let capacidades: Record<string, boolean> = {};
     let config: Extract<Msg, { tipo: "inicio" }>["config"] | null = null;
     let fin: Extract<Msg, { tipo: "fin" }> | null = null;
     let error: Extract<Msg, { tipo: "error" }> | null = null;
@@ -175,6 +195,7 @@ export default function App() {
       | null = null;
     for (const m of msgs) {
       if (m.tipo === "inicio") config = m.config;
+      else if (m.tipo === "capacidades") capacidades = m.streaming;
       else if (m.tipo === "fin") { fin = m; pendiente = null; }
       else if (m.tipo === "error") { error = m; pendiente = null; }
       else if (m.tipo === "cancelado") { cancelado = m; pendiente = null; intervencion = null; }
@@ -203,15 +224,24 @@ export default function App() {
           items.push({ clase: "separador", texto: `✓ convergencia en ${agente}` });
         else if (evento === "reintento")
           items.push({ clase: "aviso", texto: `${agente}: ${texto}` });
+        else if (evento === "delta") {
+          // Token en vivo del turno en curso: se acumula en el pendiente y se
+          // muestra al momento; el _fin lo reemplaza por el texto despojado.
+          if (pendiente && texto != null)
+            pendiente = {
+              agente: pendiente.agente, fase: pendiente.fase,
+              parcial: pendiente.parcial + texto,
+            };
+        }
         else if (evento.endsWith("_inicio"))
-          pendiente = { agente, fase: evento.replace(/_inicio$/, "") };
+          pendiente = { agente, fase: evento.replace(/_inicio$/, ""), parcial: "" };
         else if (evento.endsWith("_fin") && texto != null) {
           pendiente = null;
           items.push({ clase: "turno", agente, fase: evento.replace(/_fin$/, ""), texto });
         }
       }
     }
-    return { items, pendiente, config, fin, error, cancelado, intervencion, ejecucion, cierre };
+    return { items, pendiente, capacidades, config, fin, error, cancelado, intervencion, ejecucion, cierre };
   }, [msgs]);
 
   useEffect(() => {
@@ -437,7 +467,10 @@ export default function App() {
               </article>
             )
           )}
-          {pendiente && <Pendiente agente={pendiente.agente} fase={pendiente.fase} />}
+          {pendiente && (
+            <Pendiente agente={pendiente.agente} fase={pendiente.fase}
+              parcial={pendiente.parcial} streaming={capacidades[pendiente.agente] ?? false} />
+          )}
 
           {intervencion && (
             <div className="panel-intervencion glass-panel animate-fade-in">
