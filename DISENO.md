@@ -490,6 +490,41 @@ mensajes de commit:
   petición pero no leer el token por la política de mismo origen. Introducido
   junto al commit `5eb63a7`.
 
+### D10 — Decisiones del vocero: de síntesis abierta a plan cerrado (2026-07-20)
+
+Diseñado debatiéndolo EN DEVVATING (transcript
+`20260720-152141-*`, no convergió — prueba viva de que hacía falta) y
+arbitrado por el vocero. Motivo: la síntesis dejaba decisiones en prosa
+("depende de tu decisión") que rompían el ejecutor — al aplicar un plan con
+"Decides: X o Y", `claude -p` resolvía la ambigüedad en silencio y entraba en
+bucle. Cuatro fases, todas implementadas:
+
+- **F1 — Contrato/parser**: `roles.SINTETIZADOR` emite al final un bloque JSON
+  `{"decisiones":[{id,pregunta,opciones,recomendada,crucial,contra}]}` (cada
+  opción cita agente+ronda). `orchestrator._parse_decisiones` lo localiza por
+  marcador y lo corta con `json.raw_decode` (respeta anidamiento, a diferencia
+  del regex del veredicto); fallback a `[]`. El bloque se despoja del texto
+  visible. `Decision` + tercer estado nominal `convergido`/`abierto`/
+  `pendiente_decision` (este manda si hay una crucial sin resolver).
+- **Verificación de citas BLANDA** (arbitraje del vocero): `_verificar_contra`
+  marca `contra_en_debate=False` si el fragmento citado no aparece en la
+  transcripción; la UI muestra ⚠ pero NO bloquea ni degrada el texto (respeta
+  la doctrina "el parser mira forma, nunca contenido").
+- **F2 — UI de resolución**: el evento `fin` lleva las decisiones y el estado;
+  `POST /api/decisiones` persiste la resolución (elección propia incluida, y
+  confirmar/desmarcar `crucial`) en el transcript. Panel en el Hub con
+  opciones + recomendada + escribir la tuya.
+- **F3 — Ronda de cierre**: `POST /api/cerrar-plan` reusa los turnos
+  (`old_session`, como el resume) e inyecta las decisiones resueltas como
+  restricciones fijas; fija `min_rounds = max_rounds = rondas+1` para forzar
+  UNA ronda nueva sin que una convergencia previa corte antes. Produce un plan
+  cerrado.
+- **F4 — Gate del executor** (arbitraje: override opt-in): `Executor.execute`
+  levanta `ExecutorError` antes de crear rama si el plan trae decisiones
+  crucial sin resolver, salvo `allow_open_decisions`; una sola verdad
+  (`decisiones_crucial_sin_resolver`) que el Hub traduce a 422 y el CLI a
+  `--allow-open-decisions`. Mata el bucle de raíz.
+
 ## 12. Preguntas abiertas (para decidir antes de M0)
 
 Ninguna bloqueante. Las decisiones D1–D4 dejan M0 listo para empezar.
