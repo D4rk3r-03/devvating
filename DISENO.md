@@ -312,8 +312,10 @@ class DebateSession:
   temas con estado persistente (`rotation.py`, `.devvating/state.json`); config
   de proyecto (`appconfig.py`, `.devvating.json`) con precedencia flags > config
   > default; comando unificado `devvating <subcomando>` (`__main__.py` + entry
-  point). Verificado end-to-end. **Pendiente**: TUI gráfica (Textual) —
-  diferida por no poder conducir/verificar una UI interactiva aquí.
+  point). Verificado end-to-end. La TUI gráfica (Textual) que quedaba
+  pendiente se **cerró formalmente** a favor del Devvating Hub (M7): la sala
+  web cumple la misma necesidad (ver el debate en vivo e intervenir) sin la
+  reescritura async que exigía Textual. Ver §13.
 
 ---
 
@@ -388,7 +390,8 @@ Decidido tras un debate profundo de la propia herramienta sobre su interfaz
   estático autocontenido (`reporte.py`; puro renderizado, no toca el motor).
 - **TUI (Textual): descartada** — exigiría reescritura async
   (`on_intervention` es input bloqueante) y el motivo del aplazamiento de M4
-  sigue vigente.
+  sigue vigente. **Cierre formal (2026-07-20)**: el Hub (M7) la dejó
+  redundante; se retira del backlog (§13), no se retoma.
 - **Streaming: DIFERIDO hasta la sala web (M7)** — decisión del vocero sobre
   las 3 opciones que dejó la ronda de inversión. Motivos: el orquestador
   necesita réplicas completas (el streaming es cosmético aquí), la marca
@@ -449,6 +452,44 @@ no de creatividad); Sonnet es más rápido y consume mucha menos cuota de
 suscripción por ejecución. Configurable con `DEVVATING_EXEC_MODEL` o
 `devvating ejecutar --model`; el Hub hereda el mismo default.
 
+### D9 — Auto-auditoría de seguridad del Hub (2026-07-15)
+
+DEVVATING se auditó a sí mismo como herramienta de desarrollo (transcript
+`20260715-200644-audita-devvating-como-herramienta-de-desarrollo.json`). El
+plan salió en cuatro pasos; se documenta aquí porque hasta ahora solo vivía en
+mensajes de commit:
+
+- **Paso 1 — Hotfix del `returncode` (consenso, hecho).** `claude -p` podía
+  salir con `code != 0` y el Hub igual presentaba éxito y ofrecía commit —
+  señal de éxito falsa sobre un plan roto. `_difundir` lee ahora el
+  `returncode` (que ya viajaba en `ExecutionOutcome`) y, si es distinto de 0,
+  guarda `ultima_ejecucion` marcada: el diff se muestra pero el botón de
+  commit queda bloqueado (`/api/commit` responde 409); el descarte sigue
+  disponible. Con regresión en `tests/`. Commit `899a2ac`.
+- **Paso 2 — Aislamiento por `git worktree` (raíz arquitectónica). PENDIENTE
+  de decisión del vocero.** La raíz de los problemas es el árbol de trabajo
+  *compartido*: entre `create_branch` y el commit/descarte, `claude -p` muta
+  el árbol vivo del vocero; un agente que aborta a medias lo deja tocado, y
+  el `reset --hard` de `discard_branch` es incondicional. La solución
+  acordada es `git worktree add` a un directorio desechable (el árbol del
+  vocero no se toca; neutraliza además el TOCTOU de estado mono-usuario). El
+  desacuerdo abierto **no es la solución sino el calendario**: trabajo
+  comprometido inmediato (por el `reset --hard` activo) vs. hoja de ruta con
+  su mantenimiento presupuestado aparte (worktrees colgados, choques con
+  submódulos/LFS/hooks, concurrencia que hoy no existe en un Hub mono-usuario
+  en `127.0.0.1`). **No implementado**: espera arbitraje del vocero.
+- **Paso 3 — Confinar el `repo` objetivo (seguridad, hecho).** `/api/ejecutar`
+  aceptaba una ruta arbitraria en el cuerpo → agujero de escritura vía
+  navegador. Ahora la ejecución se confina al repo servido al arrancar el Hub
+  (se ignora cualquier override del cuerpo). Commit `ef62268`.
+- **Paso 0 — Token anti-CSRF (parte del "evaluar CSRF/CORS" del paso 3,
+  hecho).** Aun con el bind a `127.0.0.1`, cualquier página abierta en el
+  mismo navegador podía disparar los POST mutantes vía `fetch`. Se genera un
+  token por proceso, se entrega en `/api/roster` y se exige en cada POST
+  mutante (`X-Devvating-CSRF`); un atacante cross-origin puede disparar la
+  petición pero no leer el token por la política de mismo origen. Introducido
+  junto al commit `5eb63a7`.
+
 ## 12. Preguntas abiertas (para decidir antes de M0)
 
 Ninguna bloqueante. Las decisiones D1–D4 dejan M0 listo para empezar.
@@ -494,4 +535,17 @@ Detalles menores a afinar durante la implementación:
   pagados (por ronda/fase/agente), retomando exactamente donde se cortó.
   Estrenado en real reanudando la auditoría de FIEL-FILE tras un corte de
   cuota, sin repetir ni un turno.
-- TUI gráfica (Textual) — diferida de M4.
+- ~~TUI gráfica (Textual)~~ — **CERRADA (2026-07-20)** a favor del Devvating
+  Hub (M7): la sala web cubre la misma necesidad sin la reescritura async que
+  Textual exigía. Retirada del backlog; no se retoma (ver D6, M4).
+- **Aislamiento por `git worktree` en la ejecución** — pendiente de decisión
+  del vocero (paso 2 de la auto-auditoría, D9): reemplazar el `checkout -b`
+  sobre el árbol vivo compartido por `git worktree add` desechable. Diferido
+  hasta que el vocero arbitre calendario (trabajo comprometido vs. hoja de
+  ruta con mantenimiento presupuestado).
+- **Streaming de tokens en el Hub** — siguiente bloque de trabajo (deuda de D6
+  cuya condición "cuando exista la web" ya se cumplió con M7). Camino CLI
+  primero (`ClaudeCliAdapter` → `Popen` + `--output-format stream-json` con
+  lector incremental), evento opcional `on_delta` en el contrato sin tocar
+  `orchestrator._parse_verdict`, y degradación explícita "sin soporte de
+  streaming" para los adaptadores que no emiten deltas.
