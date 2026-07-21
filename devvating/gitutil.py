@@ -35,6 +35,37 @@ def create_branch(repo: str, name: str) -> str:
     return name
 
 
+def add_worktree(repo: str, branch: str, path: str) -> str:
+    """Crea un worktree DESECHABLE en `path` con una rama nueva `branch` desde
+    HEAD. Aísla la ejecución (D9 paso 2): el árbol de trabajo del vocero no se
+    toca, así que un agente que aborta a medias nunca lo ensucia."""
+    _run(["worktree", "prune"], repo)  # limpia registros de worktrees ya borrados
+    r = _run(["worktree", "add", "-b", branch, path], repo)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"No se pudo crear el worktree para '{branch}': {r.stderr.strip()}"
+        )
+    return path
+
+
+def remove_worktree(repo: str, path: str) -> None:
+    """Quita el worktree (forzado: puede tener cambios sin commitear) y poda."""
+    _run(["worktree", "remove", "--force", path], repo)
+    _run(["worktree", "prune"], repo)
+
+
+def _worktree_de_rama(repo: str, branch: str) -> str | None:
+    """Ruta del worktree que tiene `branch` chequeada, si alguno la tiene."""
+    out = _run(["worktree", "list", "--porcelain"], repo).stdout
+    actual: str | None = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            actual = line[len("worktree "):].strip()
+        elif line.strip() == f"branch refs/heads/{branch}":
+            return actual
+    return None
+
+
 def stage_all(repo: str) -> None:
     _run(["add", "-A"], repo)
 
@@ -69,6 +100,11 @@ def checkout(repo: str, branch: str) -> None:
 
 
 def delete_branch(repo: str, branch: str) -> None:
+    # Si la rama aún tiene un worktree colgando (ejecución ni commiteada ni
+    # descartada), git -D fallaría: se quita el worktree primero.
+    wt = _worktree_de_rama(repo, branch)
+    if wt:
+        remove_worktree(repo, wt)
     r = _run(["branch", "-D", branch], repo)
     if r.returncode != 0:
         raise RuntimeError(f"No se pudo borrar la rama '{branch}': {r.stderr.strip()}")
@@ -101,11 +137,24 @@ def list_branches(repo: str, prefix: str = "devvating/") -> list[dict]:
     return ramas
 
 
-def discard_branch(repo: str, base_branch: str, branch: str) -> None:
-    """Descarta la rama de ejecución y vuelve a la base.
+def discard_worktree(repo: str, worktree_path: str, branch: str) -> None:
+    """Descarta una ejecución aislada: quita el worktree y borra su rama.
 
-    Tira los cambios (staged y en el árbol), regresa a la rama previa y borra la
-    rama devvating/. El botón de "no me convenció": deja el repo como estaba.
+    A diferencia del viejo `discard_branch`, NUNCA toca el árbol de trabajo del
+    vocero (no hay `reset --hard` sobre el árbol vivo — ese era el peligro
+    activo que motivó el aislamiento por worktree, D9 paso 2).
+    """
+    if worktree_path:
+        remove_worktree(repo, worktree_path)
+    delete_branch(repo, branch)
+
+
+def discard_branch(repo: str, base_branch: str, branch: str) -> None:
+    """Descarta una rama de ejecución del árbol compartido (camino legado).
+
+    Tira los cambios (staged y en el árbol), regresa a la base y borra la rama.
+    Se conserva para ramas creadas sin worktree; el camino aislado usa
+    `discard_worktree`, que no toca el árbol del vocero.
     """
     _run(["reset", "--hard"], repo)  # descarta staged + árbol de trabajo
     checkout(repo, base_branch)

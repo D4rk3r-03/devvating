@@ -466,18 +466,22 @@ mensajes de commit:
   guarda `ultima_ejecucion` marcada: el diff se muestra pero el botón de
   commit queda bloqueado (`/api/commit` responde 409); el descarte sigue
   disponible. Con regresión en `tests/`. Commit `899a2ac`.
-- **Paso 2 — Aislamiento por `git worktree` (raíz arquitectónica). PENDIENTE
-  de decisión del vocero.** La raíz de los problemas es el árbol de trabajo
-  *compartido*: entre `create_branch` y el commit/descarte, `claude -p` muta
-  el árbol vivo del vocero; un agente que aborta a medias lo deja tocado, y
-  el `reset --hard` de `discard_branch` es incondicional. La solución
-  acordada es `git worktree add` a un directorio desechable (el árbol del
-  vocero no se toca; neutraliza además el TOCTOU de estado mono-usuario). El
-  desacuerdo abierto **no es la solución sino el calendario**: trabajo
-  comprometido inmediato (por el `reset --hard` activo) vs. hoja de ruta con
-  su mantenimiento presupuestado aparte (worktrees colgados, choques con
-  submódulos/LFS/hooks, concurrencia que hoy no existe en un Hub mono-usuario
-  en `127.0.0.1`). **No implementado**: espera arbitraje del vocero.
+- **Paso 2 — Aislamiento por `git worktree` (raíz arquitectónica).
+  IMPLEMENTADO (2026-07-20).** La raíz de los problemas era el árbol de trabajo
+  *compartido*: entre `create_branch` y el commit/descarte, `claude -p` mutaba
+  el árbol vivo del vocero, y el `reset --hard` de `discard_branch` era
+  incondicional. Ahora `Executor.execute` crea un `git worktree add` a un dir
+  desechable (`gitutil.add_worktree`) y corre el agente con `cwd` ahí; el árbol
+  del vocero no se toca. El commit ocurre en el worktree (sobre la rama
+  `devvating/`) y luego se quita; descartar es `discard_worktree` (quitar
+  worktree + borrar rama, sin `reset --hard` sobre el árbol vivo). Como el
+  worktree se ramifica de HEAD y aísla, se **relajó la exigencia de árbol
+  limpio** (decisión del vocero): se ejecuta aunque el árbol tenga trabajo sin
+  confirmar, y muere el tropiezo del "transcript recién escrito ensucia el
+  árbol". **Trampa verificada**: el worktree va en el **temp del sistema**, NO
+  bajo `.git/` — un worktree dentro de `.git` confunde a `claude -p` (lo trata
+  como interno y no escribe ahí). Path con sufijo `uuid` (no timestamp) para no
+  colisionar entre ejecuciones del mismo segundo.
 - **Paso 3 — Confinar el `repo` objetivo (seguridad, hecho).** `/api/ejecutar`
   aceptaba una ruta arbitraria en el cuerpo → agujero de escritura vía
   navegador. Ahora la ejecución se confina al repo servido al arrancar el Hub

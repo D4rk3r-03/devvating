@@ -5,9 +5,21 @@ Usan el fixture git_repo (repo real, limpio, con un commit en 'main').
 
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
+
 import pytest
 
 from devvating import gitutil
+
+
+def _worktree(git_repo, branch="devvating/x"):
+    """Crea un worktree desechable (en el temp del sistema) y devuelve su ruta."""
+    path = os.path.join(
+        tempfile.mkdtemp(prefix="dv-wt-test-"), branch.replace("/", "-")
+    )
+    return gitutil.add_worktree(str(git_repo), branch, path)
 
 
 class TestCommit:
@@ -64,3 +76,50 @@ class TestDescarte:
             ["git", "branch"], cwd=git_repo, capture_output=True, text=True
         ).stdout
         assert "devvating/x" not in ramas
+
+
+class TestWorktree:
+    def test_add_worktree_aisla_del_arbol_del_vocero(self, git_repo):
+        # Cambio sin confirmar en el árbol del vocero: el worktree no lo ve.
+        (git_repo / "hola.txt").write_text("trabajo del vocero\n", encoding="utf-8")
+        wt = _worktree(git_repo)
+        assert os.path.isdir(wt)
+        # El worktree sale de HEAD (hola.txt = "hola\n"), no del árbol sucio.
+        assert (git_repo / "hola.txt").read_text(encoding="utf-8") == "trabajo del vocero\n"
+        with open(os.path.join(wt, "hola.txt"), encoding="utf-8") as f:
+            assert f.read() == "hola\n"
+        # El repo del vocero sigue en main; la rama vive en el worktree.
+        assert gitutil.current_branch(str(git_repo)) == "main"
+
+    def test_commit_en_worktree_no_toca_el_arbol_del_vocero(self, git_repo):
+        (git_repo / "hola.txt").write_text("trabajo del vocero\n", encoding="utf-8")
+        wt = _worktree(git_repo)
+        with open(os.path.join(wt, "nuevo.py"), "w", encoding="utf-8") as f:
+            f.write("x\n")
+        gitutil.stage_all(wt)
+        sha = gitutil.commit(wt, "feat: en el worktree")
+        assert sha
+        # El commit está en la rama; el árbol del vocero, intacto.
+        log = subprocess.run(["git", "log", "--oneline", "devvating/x"],
+                             cwd=git_repo, capture_output=True, text=True).stdout
+        assert "feat: en el worktree" in log
+        assert (git_repo / "hola.txt").read_text(encoding="utf-8") == "trabajo del vocero\n"
+
+    def test_discard_worktree_quita_todo_sin_reset_del_arbol(self, git_repo):
+        (git_repo / "hola.txt").write_text("trabajo del vocero\n", encoding="utf-8")
+        wt = _worktree(git_repo)
+        gitutil.discard_worktree(str(git_repo), wt, "devvating/x")
+        assert not os.path.isdir(wt)                       # worktree quitado
+        assert "devvating/x" not in subprocess.run(
+            ["git", "branch"], cwd=git_repo, capture_output=True, text=True).stdout
+        # NUNCA se reseteó el árbol del vocero (a diferencia de discard_branch).
+        assert (git_repo / "hola.txt").read_text(encoding="utf-8") == "trabajo del vocero\n"
+
+    def test_delete_branch_quita_el_worktree_colgado(self, git_repo):
+        # Rama con worktree vivo (ni commiteada ni descartada): borrar la rama
+        # debe quitar antes el worktree, o git -D fallaría.
+        wt = _worktree(git_repo)
+        gitutil.delete_branch(str(git_repo), "devvating/x")
+        assert not os.path.isdir(wt)
+        assert "devvating/x" not in subprocess.run(
+            ["git", "branch"], cwd=git_repo, capture_output=True, text=True).stdout

@@ -220,11 +220,12 @@ def _debate_worker(
 def _ejecucion_worker(
     config: dict, emitir: Callable[[dict], None], backend=None
 ) -> None:
-    """Aplica un plan en una rama (fase 4) y emite el diff resultante.
+    """Aplica un plan en un worktree aislado (fase 4) y emite el diff.
 
     Salvaguardas del plan del Hub: SIEMPRE sin comandos (allow_commands es
-    opt-in exclusivo de la CLI), el Executor exige árbol limpio y deja los
-    cambios en staging — el Hub solo muestra; el commit es del vocero.
+    opt-in exclusivo de la CLI); el Executor aísla la ejecución en un worktree
+    desechable (D9 paso 2) y deja los cambios en staging ahí — el Hub solo
+    muestra; el commit es del vocero.
 
     Alcance diferido (M9): no pasa `verify_command` a `Executor.execute` — la
     fase 5 (verificación) solo existe desde la CLI (`ejecutar.py --verificar`,
@@ -248,15 +249,7 @@ def _ejecucion_worker(
             allow_open_decisions=config.get("forzar_decisiones", False),
         )
     except (ExecutorError, KeyError) as exc:
-        mensaje = str(exc)
-        if "sin confirmar" in mensaje:
-            # Tropiezo común al debatir y ejecutar en el mismo repo: el
-            # transcript recién guardado ensucia el árbol.
-            mensaje += (
-                " Pista: si lo único nuevo son artefactos del propio debate, "
-                "añade 'transcripts/' y '.devvating/' al .gitignore del repo."
-            )
-        emitir({"tipo": "ejecucion_error", "mensaje": mensaje})
+        emitir({"tipo": "ejecucion_error", "mensaje": str(exc)})
         emitir({"tipo": "ejecucion_cerrada"})
         return
     emitir({
@@ -264,6 +257,7 @@ def _ejecucion_worker(
         "rama": resultado.branch,
         "rama_base": resultado.base_branch,
         "repo": config["repo"],
+        "worktree": resultado.worktree,
         "returncode": resultado.returncode,
         "archivos": resultado.changed_files,
         "diff": resultado.diff,
@@ -330,7 +324,8 @@ def crear_app(
                 # la auto-auditoría; el descarte sigue disponible).
                 app.state.ultima_ejecucion = {
                     "rama": msg["rama"], "base": msg.get("rama_base", ""),
-                    "repo": msg["repo"], "returncode": msg.get("returncode", 0),
+                    "repo": msg["repo"], "worktree": msg.get("worktree", ""),
+                    "returncode": msg.get("returncode", 0),
                 }
             # Los deltas de streaming son transitorios (la vista final llega en
             # el evento *_fin con el texto ya despojado): se difunden a los
@@ -590,21 +585,30 @@ def crear_app(
         if not mensaje:
             raise HTTPException(422, "El mensaje de commit no puede estar vacío.")
         try:
-            sha = gitutil.commit(ue["repo"], mensaje)
+            # El commit va en el worktree aislado (sobre la rama devvating/); el
+            # merge a la rama de trabajo lo hace el vocero cuando revisó.
+            sha = gitutil.commit(ue.get("worktree") or ue["repo"], mensaje)
         except RuntimeError as exc:
             raise HTTPException(422, str(exc))
+        # Commiteado: el worktree ya cumplió su función; se quita (la rama queda).
+        if ue.get("worktree"):
+            gitutil.remove_worktree(ue["repo"], ue["worktree"])
         app.state.ultima_ejecucion = None
         _emitir({"tipo": "commit_fin", "sha": sha, "rama": ue["rama"]})
         return {"ok": True, "sha": sha}
 
     @app.post("/api/descartar", dependencies=[_csrf])
     def descartar_cambios() -> dict:
-        """Deshace la ejecución: vuelve a la rama base y borra la devvating/."""
+        """Deshace la ejecución: quita el worktree aislado y borra su rama.
+
+        No toca el árbol de trabajo del vocero (D9 paso 2): a diferencia del
+        viejo `reset --hard`, aquí no hay nada que resetear en el árbol vivo.
+        """
         ue = app.state.ultima_ejecucion
         if not ue:
             raise HTTPException(409, "No hay una ejecución que descartar.")
         try:
-            gitutil.discard_branch(ue["repo"], ue["base"], ue["rama"])
+            gitutil.discard_worktree(ue["repo"], ue.get("worktree", ""), ue["rama"])
         except RuntimeError as exc:
             raise HTTPException(422, str(exc))
         app.state.ultima_ejecucion = None

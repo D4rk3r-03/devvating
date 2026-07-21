@@ -767,24 +767,19 @@ class TestEjecucion:
             assert c.post("/api/descartar").status_code == 200  # descartar sí
         assert gitutil.current_branch(str(git_repo)) == "main"
 
-    def test_repo_sucio_reporta_error_amable(self, git_repo):
+    def test_repo_sucio_ya_no_bloquea_gracias_al_worktree(self, git_repo):
+        # Antes, un árbol sucio bloqueaba la ejecución. Con el aislamiento por
+        # worktree (D9 paso 2) ejecuta igual, y el trabajo sin confirmar del
+        # vocero queda intacto (se aplicó en un worktree aparte, no en su árbol).
         self._ignorar_transcripts(git_repo)
-        (git_repo / "hola.txt").write_text("sucio\n", encoding="utf-8")
+        (git_repo / "hola.txt").write_text("trabajo del vocero\n", encoding="utf-8")
         app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
                         backend_ejecucion=_BackendEscritor())
         with TestClient(app) as c:
             c.headers["X-Devvating-CSRF"] = app.state.csrf_token
-            self._debatir(c)
-            nombre = c.get("/api/transcripts").json()["transcripts"][0]
-            with c.websocket_connect("/ws") as ws:
-                ws.receive_json()
-                c.post("/api/ejecutar", json={"transcript": nombre})
-                for _ in range(60):
-                    msg = ws.receive_json()
-                    if msg["tipo"] == "ejecucion_error":
-                        assert "sin confirmar" in msg["mensaje"]
-                        return
-            pytest.fail("no llegó el error de árbol sucio")
+            fin = self._ejecutar_hasta_fin(c)
+            assert fin["returncode"] == 0 and fin["archivos"]  # ejecutó
+        assert (git_repo / "hola.txt").read_text(encoding="utf-8") == "trabajo del vocero\n"
 
     def test_transcript_sin_sintesis_es_422(self, git_repo):
         import json as _json

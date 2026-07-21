@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Protocol, runtime_checkable
 
@@ -64,6 +66,9 @@ class ExecutionOutcome:
     allow_commands: bool = False
     # Rama previa a crear la de ejecución: a dónde volver si el vocero descarta.
     base_branch: str = ""
+    # Worktree DESECHABLE donde se aplicó el plan (D9 paso 2): el commit y el
+    # descarte operan ahí, no sobre el árbol del vocero.
+    worktree: str = ""
     # Fase 5 (M9) — verificación tras aplicar el plan. verify_command vacío =
     # no se pidió verificación (comportamiento clásico, sin cambios).
     verify_command: str = ""
@@ -164,13 +169,23 @@ class Executor:
         slug = "".join(c if c.isalnum() else "-" for c in title.lower())[:40].strip("-")
         return f"devvating/{slug or 'plan'}-{time.strftime('%Y%m%d-%H%M%S')}"
 
+    def _worktree_path(self, branch: str) -> str:
+        # En el temp del sistema, NO bajo .git/: un worktree dentro de .git
+        # confunde a `claude -p` (trata .git como interno y no escribe ahí,
+        # verificado en real). El dir final lo crea `git worktree add`.
+        base = os.path.join(tempfile.gettempdir(), "devvating-worktrees")
+        os.makedirs(base, exist_ok=True)
+        slug = branch.replace("/", "-")
+        # Sufijo único (no timestamp): dos ejecuciones en el mismo segundo
+        # colisionarían el path, y `git worktree add` exige que no exista.
+        return os.path.join(base, f"{slug}-{uuid.uuid4().hex[:8]}")
+
     def execute(
         self,
         plan: ExecutionPlan,
         *,
         allow_commands: bool = False,
         branch: str | None = None,
-        require_clean: bool = True,
         verify_command: str | None = None,
         allow_open_decisions: bool = False,
     ) -> ExecutionOutcome:
@@ -180,7 +195,7 @@ class Executor:
             )
         # Gate de decisiones (una sola verdad; el Hub la traduce a 422): no
         # ejecutar un plan con una decisión crucial abierta. Va antes de crear
-        # rama, así no deja ninguna colgada.
+        # el worktree, así no deja ninguno colgado.
         if plan.decisiones_pendientes and not allow_open_decisions:
             preguntas = "; ".join(p for p in plan.decisiones_pendientes if p)
             raise ExecutorError(
@@ -189,23 +204,22 @@ class Executor:
                 f"silencio). Pendientes: {preguntas}. Resuélvelas y cierra el plan, "
                 "o fuerza bajo tu riesgo (--allow-open-decisions)."
             )
-        if require_clean and not gitutil.is_clean(self.repo):
-            raise ExecutorError(
-                "El árbol de trabajo tiene cambios sin confirmar. Haz commit o "
-                "stash antes de ejecutar (así el diff refleja solo los cambios del plan)."
-            )
 
         base_branch = gitutil.current_branch(self.repo)
         branch = branch or self._default_branch(plan.title)
         self._on_event("rama", branch)
-        gitutil.create_branch(self.repo, branch)
+        # Aislamiento por worktree (D9 paso 2): el agente escribe en un dir
+        # desechable ramificado de HEAD, nunca en el árbol del vocero. Por eso
+        # no exige árbol limpio: sus cambios sin confirmar no contaminan el diff.
+        worktree = self._worktree_path(branch)
+        gitutil.add_worktree(self.repo, branch, worktree)
 
         self._on_event("ejecutando", self.backend.name)
-        code, output = self.backend.run(_exec_prompt(plan), self.repo, allow_commands)
+        code, output = self.backend.run(_exec_prompt(plan), worktree, allow_commands)
 
-        gitutil.stage_all(self.repo)
-        diff = gitutil.staged_diff(self.repo)
-        changed = gitutil.staged_changed_files(self.repo)
+        gitutil.stage_all(worktree)
+        diff = gitutil.staged_diff(worktree)
+        changed = gitutil.staged_changed_files(worktree)
         self._on_event("diff_listo", str(len(changed)))
 
         verify_returncode: int | None = None
@@ -213,7 +227,7 @@ class Executor:
         verify_corrected = False
         if verify_command:
             self._on_event("verificando", verify_command)
-            verify_returncode, verify_output = self._run_verify(verify_command)
+            verify_returncode, verify_output = self._run_verify(verify_command, worktree)
             if verify_returncode != 0:
                 self._on_event("verificacion_fallida", str(verify_returncode))
                 # Mini-ronda de corrección acotada: UNA sola iteración, mismo
@@ -222,14 +236,14 @@ class Executor:
                 self._on_event("corrigiendo", self.backend.name)
                 self.backend.run(
                     _correction_prompt(plan, verify_command, verify_output),
-                    self.repo,
+                    worktree,
                     allow_commands,
                 )
                 verify_corrected = True
-                gitutil.stage_all(self.repo)
-                diff = gitutil.staged_diff(self.repo)
-                changed = gitutil.staged_changed_files(self.repo)
-                verify_returncode, verify_output = self._run_verify(verify_command)
+                gitutil.stage_all(worktree)
+                diff = gitutil.staged_diff(worktree)
+                changed = gitutil.staged_changed_files(worktree)
+                verify_returncode, verify_output = self._run_verify(verify_command, worktree)
                 self._on_event("verificacion_reintentada", str(verify_returncode))
             else:
                 self._on_event("verificacion_ok", "")
@@ -243,14 +257,16 @@ class Executor:
             changed_files=changed,
             allow_commands=allow_commands,
             base_branch=base_branch,
+            worktree=worktree,
             verify_command=verify_command or "",
             verify_returncode=verify_returncode,
             verify_output=verify_output,
             verify_corrected=verify_corrected,
         )
 
-    def _run_verify(self, command: str) -> tuple[int, str]:
+    def _run_verify(self, command: str, cwd: str) -> tuple[int, str]:
+        # Corre en el worktree: es donde viven los cambios del plan.
         proc = subprocess.run(
-            command, shell=True, cwd=self.repo, capture_output=True, text=True
+            command, shell=True, cwd=cwd, capture_output=True, text=True
         )
         return proc.returncode, proc.stdout + proc.stderr

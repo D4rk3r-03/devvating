@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from devvating import gitutil
@@ -31,11 +33,13 @@ class WriterBackend:
 
 
 class TestExecutor:
-    def test_crea_rama_y_capta_diff_de_los_cambios(self, git_repo):
+    def test_crea_worktree_aislado_y_capta_diff(self, git_repo):
         ex = Executor(str(git_repo), WriterBackend())
         out = ex.execute(PLAN, branch="devvating/test")
         assert out.branch == "devvating/test"
-        assert gitutil.current_branch(str(git_repo)) == "devvating/test"
+        # El repo del vocero NO cambia de rama: el plan se aplicó en el worktree.
+        assert gitutil.current_branch(str(git_repo)) == "main"
+        assert out.worktree and Path(out.worktree).is_dir()
         assert sorted(out.changed_files) == ["hola.txt", "nuevo.txt"]
         assert "mundo" in out.diff and out.returncode == 0
 
@@ -49,17 +53,20 @@ class TestExecutor:
         with pytest.raises(ExecutorError, match="no es un repositorio"):
             ex.execute(PLAN)
 
-    def test_rechaza_arbol_de_trabajo_sucio(self, git_repo):
-        (git_repo / "hola.txt").write_text("modificado\n", encoding="utf-8")
+    def test_no_toca_el_arbol_del_vocero_aunque_este_sucio(self, git_repo):
+        # Antes exigía árbol limpio; ahora el worktree aísla, así que ejecuta
+        # igual con cambios sin confirmar del vocero y NO los pisa (D9 paso 2).
+        (git_repo / "hola.txt").write_text("trabajo del vocero\n", encoding="utf-8")
         ex = Executor(str(git_repo), WriterBackend())
-        with pytest.raises(ExecutorError, match="sin confirmar"):
-            ex.execute(PLAN)
+        out = ex.execute(PLAN)
+        assert out.changed_files  # ejecutó pese al árbol sucio
+        assert (git_repo / "hola.txt").read_text(encoding="utf-8") == "trabajo del vocero\n"
 
     def test_no_commitea_nada(self, git_repo):
         ex = Executor(str(git_repo), WriterBackend())
-        ex.execute(PLAN)
-        # Los cambios quedan en staging, no confirmados.
-        assert gitutil.staged_changed_files(str(git_repo))
+        out = ex.execute(PLAN)
+        # Los cambios quedan en staging DEL WORKTREE, sin commitear.
+        assert gitutil.staged_changed_files(out.worktree)
 
 
 class VerifyBackend:
