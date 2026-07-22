@@ -329,6 +329,17 @@ class ClaudeCliAdapter:
                 detalle = f"{detalle} [{status}]"
             raise clasificar_fallo(detalle, "claude -p reportó error")
 
+        texto = str(data.get("result", "")).strip()
+        if not texto:
+            # Mismo criterio que el camino de texto plano: un turno sin texto
+            # no es un turno. Aquí el JSON no marcó error, así que el diagnóstico
+            # útil está en stderr si lo hubo.
+            detalle = (err or "").strip()[:500]
+            raise clasificar_fallo(
+                detalle or "el mensaje 'result' llegó vacío.",
+                "claude -p terminó sin producir respuesta",
+            )
+
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         cost = data.get("total_cost_usd")
         self.last_usage = TurnUsage(
@@ -338,7 +349,7 @@ class ClaudeCliAdapter:
             cache_creation_tokens=int(usage.get("cache_creation_input_tokens", 0) or 0),
             cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
         )
-        return str(data.get("result", "")).strip()
+        return texto
 
 
 class PlainCliAdapter:
@@ -379,7 +390,21 @@ class PlainCliAdapter:
             raise clasificar_fallo(
                 detalle, f"{self.binary} -p salió con código {proc.returncode}"
             )
-        return proc.stdout.strip()
+        salida = proc.stdout.strip()
+        if not salida:
+            # Éxito aparente (código 0) SIN respuesta: no es un turno, es un
+            # fallo mudo. Verificado en real con `agy`, que sale 0 y no imprime
+            # nada cuando una herramienta suya se auto-deniega en headless; el
+            # porqué solo viaja en stderr, que aquí se descartaba por venir el
+            # código en 0. Aceptarlo como turno dejaba a un agente MUDO en el
+            # debate: rondas y síntesis se completaban con un solo participante
+            # y el vocero pagaba un debate que nunca ocurrió.
+            detalle = (proc.stderr or "").strip()[:500]
+            raise clasificar_fallo(
+                detalle or "no imprimió nada en stdout ni en stderr.",
+                f"{self.binary} -p terminó sin producir respuesta",
+            )
+        return salida
 
 
 class GeminiCliAdapter(PlainCliAdapter):

@@ -107,10 +107,19 @@ class ClaudeAdapter:
 
             if response.stop_reason != "tool_use":
                 # Turno terminado: devolver el texto final.
-                self._cerrar_turno(total)
-                return "".join(
+                texto = "".join(
                     b.text for b in response.content if b.type == "text"
                 ).strip()
+                if not texto:
+                    # Turno sin texto (p. ej. solo bloques de thinking, o corte
+                    # por max_tokens antes de emitir nada): no es una postura.
+                    # Se trata como transitorio porque reintentar suele curarlo.
+                    raise TransientProviderError(
+                        "API de Claude: turno sin texto "
+                        f"(stop_reason={response.stop_reason})."
+                    )
+                self._cerrar_turno(total)
+                return texto
 
             # Continuar el bucle: eco de la respuesta + resultados de herramientas.
             messages.append({"role": "assistant", "content": response.content})

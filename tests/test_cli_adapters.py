@@ -299,3 +299,42 @@ class TestStdinCerrado:
         out = ClaudeCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
         assert out == "ok"
         assert capturado.get("stdin") == subprocess.DEVNULL
+
+
+class TestTurnoVacio:
+    """Un CLI que sale con código 0 pero sin imprimir nada NO es un turno.
+
+    Verificado en real con `agy`: cuando una herramienta suya se auto-deniega
+    en headless, sale 0 y no imprime nada; el porqué solo viaja en stderr.
+    Aceptarlo dejaba un agente MUDO debatiendo — rondas y síntesis completas
+    con un solo participante real.
+    """
+
+    def test_plain_cli_sin_salida_falla_con_el_stderr(self, fake_bin, tmp_path):
+        motivo = "no output produced — a tool required the command permission"
+        binario = fake_bin("mudo", f'echo "{motivo}" >&2; exit 0')
+        with pytest.raises(CliAdapterError) as info:
+            GeminiCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
+        # El diagnóstico del CLI llega al vocero en vez de perderse.
+        assert "command permission" in str(info.value)
+        assert "sin producir respuesta" in str(info.value)
+
+    def test_plain_cli_sin_salida_ni_stderr_igual_falla(self, fake_bin, tmp_path):
+        binario = fake_bin("mudo2", "exit 0")
+        with pytest.raises(CliAdapterError, match="no imprimió nada"):
+            GeminiCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
+
+    def test_plain_cli_solo_espacios_cuenta_como_vacio(self, fake_bin, tmp_path):
+        binario = fake_bin("blanco", 'printf "  \\n\\n"; exit 0')
+        with pytest.raises(CliAdapterError):
+            GeminiCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
+
+    def test_claude_cli_result_vacio_falla(self, fake_bin, tmp_path):
+        binario = fake_bin("cla-mudo", f"echo '{_result(result='')}'")
+        with pytest.raises(CliAdapterError, match="vacío"):
+            ClaudeCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
+
+    def test_respuesta_normal_sigue_pasando(self, fake_bin, tmp_path):
+        binario = fake_bin("ok", 'echo "mi postura"')
+        out = GeminiCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
+        assert out == "mi postura"

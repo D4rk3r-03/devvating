@@ -93,3 +93,17 @@ class TestPromptCaching:
         tr3 = tool_results_de(fake.llamadas[2]["messages"])
         assert "cache_control" not in tr3[0][-1]
         assert tr3[1][-1].get("cache_control") == {"type": "ephemeral"}
+
+
+class TestTurnoSinTexto:
+    def test_respuesta_sin_texto_es_transitoria(self):
+        # Un turno que termina sin texto (solo thinking, o corte antes de
+        # emitir) no es una postura: aceptarlo metía a un agente mudo en el
+        # debate. Mismo criterio que los adaptadores CLI.
+        from devvating.adapters.base import TransientProviderError
+        import pytest
+
+        vacio = SimpleNamespace(content=[], stop_reason="end_turn", usage=_usage())
+        adapter, _ = _adapter_con(vacio)
+        with pytest.raises(TransientProviderError, match="sin texto"):
+            adapter.converse("ROL", "p", ToolRegistry())
