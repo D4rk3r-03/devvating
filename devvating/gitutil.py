@@ -6,6 +6,7 @@ rama y se muestra el diff antes de que el vocero decida hacer commit o descartar
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 
@@ -64,6 +65,56 @@ def _worktree_de_rama(repo: str, branch: str) -> str | None:
         elif line.strip() == f"branch refs/heads/{branch}":
             return actual
     return None
+
+
+def prune_worktrees(repo: str) -> None:
+    """Descarta los registros de worktrees cuyo directorio ya no existe."""
+    _run(["worktree", "prune"], repo)
+
+
+def worktree_tiene_cambios(path: str) -> bool:
+    """True si el worktree tiene algo sin commitear (staged o en el árbol).
+
+    Es el criterio EXACTO de seguridad para limpiarlo: quitar un worktree no
+    borra su rama ni sus commits —esos sobreviven en el repo—, así que lo
+    único que se pierde al removerlo es justamente lo que no está commiteado.
+    """
+    return _run(["status", "--porcelain"], path).stdout.strip() != ""
+
+
+def list_worktrees(repo: str, prefix: str = "devvating/") -> list[dict]:
+    """Worktrees de ejecución registrados, con lo necesario para decidir.
+
+    Devuelve por cada uno: `path`, `rama`, `existe` (el dir sigue en disco) y
+    `tiene_cambios` (trabajo sin commitear que se perdería al quitarlo). El
+    worktree principal (el del vocero) queda fuera: solo se listan los de
+    ramas bajo `prefix`.
+    """
+    out = _run(["worktree", "list", "--porcelain"], repo).stdout
+    worktrees: list[dict] = []
+    actual: dict | None = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            actual = {"path": line[len("worktree "):].strip(), "rama": ""}
+        elif line.startswith("branch ") and actual is not None:
+            actual["rama"] = line[len("branch "):].strip().removeprefix("refs/heads/")
+        elif not line.strip() and actual is not None:
+            worktrees.append(actual)
+            actual = None
+    if actual is not None:
+        worktrees.append(actual)
+
+    resultado = []
+    for wt in worktrees:
+        if not wt["rama"].startswith(prefix):
+            continue
+        existe = os.path.isdir(wt["path"])
+        resultado.append({
+            **wt,
+            "existe": existe,
+            "tiene_cambios": worktree_tiene_cambios(wt["path"]) if existe else False,
+        })
+    return resultado
 
 
 def stage_all(repo: str) -> None:

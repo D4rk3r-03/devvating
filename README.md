@@ -62,7 +62,10 @@ devvating reporte transcripts/<timestamp>-<topic>.json
 devvating ejecutar --repo /path/to/project \
     --from-transcript transcripts/<timestamp>-<topic>.json
 
-# 5) Or run it all from the browser — the debate room, live:
+# 5) Reclaim the isolated worktrees left behind by past executions:
+devvating limpiar --repo /path/to/project
+
+# 6) Or run it all from the browser — the debate room, live:
 pip install -e ".[hub]"
 cd devvating-ui && npm install && npm run build && cd ..
 devvating hub          # → http://127.0.0.1:8777

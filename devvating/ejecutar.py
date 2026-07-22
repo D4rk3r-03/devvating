@@ -217,10 +217,16 @@ def main(argv: list[str] | None = None) -> int:
                 outcome.verify_output, "text", theme="ansi_dark", word_wrap=True
             ))
 
+    # El plan se aplicó en un worktree aislado, no en el árbol del vocero: las
+    # instrucciones tienen que apuntar ahí, o el vocero busca sus cambios donde
+    # no están y deja el worktree colgando (lo recoge `devvating limpiar`).
     console.print(
-        f"\n[bold]Vocero:[/bold] revisa el diff en la rama [cyan]{outcome.branch}[/cyan]. "
-        "Para conservar: `git commit`. Para descartar: vuelve a tu rama y "
-        f"`git branch -D {outcome.branch}`."
+        f"\n[bold]Vocero:[/bold] los cambios están en [cyan]{outcome.worktree}[/cyan] "
+        f"(rama [cyan]{outcome.branch}[/cyan]), en staging y sin commitear.\n"
+        f"  Conservar:  git -C {outcome.worktree} commit -m \"…\"\n"
+        f"  Descartar:  git worktree remove --force {outcome.worktree} && "
+        f"git branch -D {outcome.branch}\n"
+        "[dim]Los worktrees que queden colgando se recogen con `devvating limpiar`.[/dim]"
     )
     return 0
 
