@@ -1262,3 +1262,109 @@ class TestHistorialYPendientes:
         c, _, _ = hub_con_datos
         r = c.post("/api/historial/reindexar", headers={"X-Devvating-CSRF": "no"})
         assert r.status_code == 403
+
+
+class TestFusionar:
+    """Bloque 2: el merge entra en la web, el push no (decisión del vocero,
+    2026-07-22). Es la única escritura del Hub sobre la rama de trabajo, así
+    que las guardas son el grueso de estos tests."""
+
+    @pytest.fixture
+    def repo_con_rama(self, git_repo, tmp_path, monkeypatch):
+        """Repo con una rama devvating/ que trae un commit propio."""
+        import subprocess
+
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        def git(*a):
+            subprocess.run(["git", *a], cwd=git_repo, check=True,
+                           capture_output=True)
+        git("checkout", "-q", "-b", "devvating/aporta")
+        (git_repo / "aportado.txt").write_text("del debate\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-qm", "trabajo del plan")
+        git("checkout", "-q", "main")
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            yield c, app, git_repo
+
+    def test_fusiona_y_el_trabajo_llega_a_la_rama_actual(self, repo_con_rama):
+        c, _, git_repo = repo_con_rama
+        assert not (git_repo / "aportado.txt").exists()   # aún no está en main
+        r = c.post("/api/ramas/fusionar", json={"rama": "devvating/aporta"})
+        assert r.status_code == 200
+        assert r.json()["destino"] == "main"
+        assert (git_repo / "aportado.txt").read_text(encoding="utf-8") == "del debate\n"
+        # Y deja de contarse como pendiente.
+        tipos = [(i["tipo"], i.get("rama")) for i in c.get("/api/pendientes").json()["pendientes"]]
+        assert ("rama_sin_fusionar", "devvating/aporta") not in tipos
+
+    def test_rechaza_arbol_sucio_sin_tocar_nada(self, repo_con_rama):
+        # Un conflicto con cambios sin confirmar dejaría el merge a medias, y
+        # desde el navegador no hay forma de resolverlo.
+        c, _, git_repo = repo_con_rama
+        (git_repo / "hola.txt").write_text("trabajo del vocero\n", encoding="utf-8")
+        r = c.post("/api/ramas/fusionar", json={"rama": "devvating/aporta"})
+        assert r.status_code == 409 and "sin confirmar" in r.json()["detail"]
+        assert (git_repo / "hola.txt").read_text(encoding="utf-8") == "trabajo del vocero\n"
+        assert not (git_repo / "aportado.txt").exists()
+
+    def test_rechaza_rama_con_ejecucion_sin_cerrar(self, repo_con_rama):
+        c, app, git_repo = repo_con_rama
+        rid = next(iter(app.state.repos))
+        app.state.ejecuciones[rid] = {
+            "rama": "devvating/aporta", "base": "main", "repo": str(git_repo),
+            "worktree": "", "returncode": 0,
+        }
+        r = c.post("/api/ramas/fusionar", json={"rama": "devvating/aporta"})
+        assert r.status_code == 409 and "sin cerrar" in r.json()["detail"]
+
+    def test_solo_ramas_de_ejecucion(self, repo_con_rama):
+        c, _, _ = repo_con_rama
+        r = c.post("/api/ramas/fusionar", json={"rama": "main"})
+        assert r.status_code == 422
+
+    def test_no_fusiona_la_rama_actual_consigo_misma(self, repo_con_rama):
+        import subprocess
+
+        c, _, git_repo = repo_con_rama
+        subprocess.run(["git", "checkout", "-q", "devvating/aporta"],
+                       cwd=git_repo, check=True, capture_output=True)
+        r = c.post("/api/ramas/fusionar", json={"rama": "devvating/aporta"})
+        assert r.status_code == 409 and "Ya estás en" in r.json()["detail"]
+
+    def test_un_conflicto_deshace_y_deja_la_rama_intacta(self, git_repo, tmp_path, monkeypatch):
+        # Dos ramas tocan la misma línea: git no puede resolverlo solo.
+        import subprocess
+
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        def git(*a):
+            subprocess.run(["git", *a], cwd=git_repo, check=True, capture_output=True)
+        git("checkout", "-q", "-b", "devvating/choca")
+        (git_repo / "hola.txt").write_text("version de la rama\n", encoding="utf-8")
+        git("add", "-A"); git("commit", "-qm", "rama")
+        git("checkout", "-q", "main")
+        (git_repo / "hola.txt").write_text("version de main\n", encoding="utf-8")
+        git("add", "-A"); git("commit", "-qm", "main")
+
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            r = c.post("/api/ramas/fusionar", json={"rama": "devvating/choca"})
+            assert r.status_code == 409
+            assert "se deshizo" in r.json()["detail"]
+        # El árbol quedó como estaba: sin marcas de conflicto ni merge a medias.
+        assert (git_repo / "hola.txt").read_text(encoding="utf-8") == "version de main\n"
+        assert gitutil.is_clean(str(git_repo))
+
+    def test_exige_csrf(self, repo_con_rama):
+        c, _, _ = repo_con_rama
+        r = c.post("/api/ramas/fusionar", json={"rama": "devvating/aporta"},
+                   headers={"X-Devvating-CSRF": "falso"})
+        assert r.status_code == 403
+
+    def test_no_existe_endpoint_de_push(self, repo_con_rama):
+        # Decisión explícita del vocero: publicar no se hace desde la web.
+        c, _, _ = repo_con_rama
+        for ruta in ("/api/push", "/api/ramas/publicar", "/api/publicar"):
+            assert c.post(ruta, json={}).status_code == 404

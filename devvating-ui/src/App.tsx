@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import {
   Ban, Check, FileText, GitBranch, Hand, ListChecks, Play, RefreshCw, RotateCcw,
-  Scale, Send, Swords, Trash2, TriangleAlert, Boxes, History, Inbox,
+  Scale, Send, Swords, Trash2, TriangleAlert, Boxes, History, Inbox, GitMerge,
 } from "lucide-react";
 import "./App.css";
 
@@ -299,6 +299,22 @@ export default function App() {
   const cargarRamas = (rid = repoId) =>
     fetch(rid ? `/api/ramas?repo_id=${encodeURIComponent(rid)}` : "/api/ramas")
       .then((r) => r.json()).then((d) => setRamas(d.ramas ?? []));
+
+  // Fusionar es la única acción del Hub que escribe en tu rama de trabajo, así
+  // que se confirma; el servidor además exige árbol limpio y deshace ante
+  // conflicto. Publicar (push) no está aquí a propósito: decisión del vocero.
+  const fusionarRama = async (nombre: string, rid = repoId) => {
+    if (!window.confirm(
+      `¿Fusionar ${nombre} en tu rama actual?\n\n` +
+      "El trabajo de esa rama pasará a tu rama de trabajo. Si hay conflicto se " +
+      "deshace y no se toca nada."
+    )) return;
+    const r = await post("/api/ramas/fusionar", { rama: nombre, repo_id: rid });
+    const d = await r.json();
+    if (!r.ok) { setAviso(d.detail ?? "No se pudo fusionar."); return; }
+    setAviso(`Fusionado ${nombre} en ${d.destino}.`);
+    cargarRamas(); cargarGlobal();
+  };
 
   const borrarRama = async (nombre: string) => {
     if (!window.confirm(`¿Borrar la rama ${nombre}? Se pierde lo que no hayas fusionado.`))
@@ -753,10 +769,16 @@ export default function App() {
                   {r.actual ? (
                     <span className="rama-actual" title="rama actual">aquí</span>
                   ) : (
-                    <button className="rama-borrar" title="Borrar rama"
-                      onClick={() => borrarRama(r.nombre)}>
-                      <Trash2 size={13} />
-                    </button>
+                    <>
+                      <button className="rama-fusionar" title="Fusionar en tu rama actual"
+                        onClick={() => fusionarRama(r.nombre)}>
+                        <GitMerge size={13} />
+                      </button>
+                      <button className="rama-borrar" title="Borrar rama"
+                        onClick={() => borrarRama(r.nombre)}>
+                        <Trash2 size={13} />
+                      </button>
+                    </>
                   )}
                 </li>
               ))}
@@ -870,9 +892,14 @@ export default function App() {
                           <button className="pend-ir" onClick={() => atender(p)}>
                             {p.tipo === "debate_a_medias" ? "Reanudar" : "Resolver"}
                           </button>
+                        ) : p.tipo === "rama_sin_fusionar" ? (
+                          <button className="pend-ir"
+                            onClick={() => fusionarRama(p.rama!, p.repo_id)}>
+                            Fusionar
+                          </button>
                         ) : (
                           <span className="pend-nota" title={p.detalle}>
-                            {p.tipo === "ejecucion" ? "revisa el diff" : "merge manual"}
+                            revisa el diff
                           </span>
                         )}
                       </li>

@@ -551,3 +551,10 @@ pre.diff .hunk { color: var(--accent); }
 .ix-nota { flex-shrink: 0; color: var(--text-muted); font-size: .7rem; width: 5rem;
   text-align: right; }
 .global-pie { margin-top: .9rem; color: var(--text-muted); font-size: .74rem; }
+.rama-fusionar {
+  display: inline-flex; padding: .3rem; border: none; cursor: pointer;
+  background: transparent; color: var(--text-muted); border-radius: 6px; flex-shrink: 0;
+}
+.rama-fusionar:hover {
+  color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent);
+}

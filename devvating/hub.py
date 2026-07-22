@@ -920,6 +920,54 @@ def crear_app(
             ],
         }
 
+    @app.post("/api/ramas/fusionar", dependencies=[_csrf])
+    def fusionar_rama(cuerpo: dict) -> dict:
+        """Lleva el trabajo de una rama de ejecución a tu rama actual.
+
+        Decisión del vocero (2026-07-22): el merge SÍ se hace desde la web; el
+        push NO — publicar es lo único de la cadena que sale de la máquina y no
+        se puede deshacer, así que sigue siendo un acto deliberado en consola.
+
+        Tres guardas antes de tocar nada, porque esta es la única escritura del
+        Hub sobre la rama de trabajo:
+          - solo ramas `devvating/` (mismo criterio que borrarlas);
+          - árbol limpio, o el merge arrastraría cambios sin confirmar del
+            vocero a un conflicto que desde el navegador no puede resolver;
+          - la rama no puede tener una ejecución sin cerrar: eso es trabajo que
+            aún no revisó, y fusionarlo sería decidir por él.
+        """
+        nombre = str(cuerpo.get("rama") or "")
+        rid = str(cuerpo.get("repo_id") or repo_default)
+        ruta = _ruta_repo(rid)
+        if not nombre.startswith("devvating/"):
+            raise HTTPException(422, "Solo se fusionan ramas de ejecución (devvating/).")
+        if not gitutil.is_git_repo(ruta):
+            raise HTTPException(422, f"'{ruta}' no es un repositorio git.")
+        actual = gitutil.current_branch(ruta)
+        if nombre == actual:
+            raise HTTPException(409, f"Ya estás en '{nombre}': no hay nada que fusionar.")
+        if not gitutil.is_clean(ruta):
+            raise HTTPException(
+                409,
+                "Tu árbol de trabajo tiene cambios sin confirmar. Commitéalos o "
+                "guárdalos antes de fusionar: si no, un conflicto te dejaría el "
+                "merge a medias y desde aquí no se puede resolver.",
+            )
+        pendiente = app.state.ejecuciones.get(rid)
+        if pendiente and pendiente.get("rama") == nombre:
+            raise HTTPException(
+                409,
+                f"'{nombre}' tiene una ejecución sin cerrar. Revisa el diff y "
+                "commitea o descarta antes de fusionarla.",
+            )
+        try:
+            resumen = gitutil.merge(ruta, nombre)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
+        _emitir({"tipo": "merge_fin", "rama": nombre, "destino": actual,
+                 "repo_id": rid, "resumen": resumen})
+        return {"ok": True, "rama": nombre, "destino": actual, "resumen": resumen}
+
     @app.post("/api/ramas/borrar", dependencies=[_csrf])
     def borrar_rama(cuerpo: dict) -> dict:
         """Borra una rama de ejecución. Solo devvating/, nunca la rama actual."""

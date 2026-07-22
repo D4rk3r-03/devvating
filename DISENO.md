@@ -679,3 +679,33 @@ la máquina, sin recorrer proyecto por proyecto.
   registro es un fixture de SESIÓN, no por test.
 
 Con esto quedan cerradas las tres fases de D11.
+
+### D14 — El merge entra en la web; el push no (2026-07-22)
+
+Arbitrado por el vocero al fijar la hoja de ruta hacia "toda la gestión desde
+el navegador, la consola solo para lanzar el Hub". Cerrar el ciclo exigía
+llevar el trabajo de una rama `devvating/` a la rama de trabajo, y ahí hay un
+salto: hasta ahora el Hub solo escribía en ramas de ejecución y worktrees
+desechables, cosas que si salen mal se borran y no pasó nada.
+
+- **`merge` sí** (`POST /api/ramas/fusionar`). Es recuperable con git y es el
+  paso que faltaba para no volver a la terminal tras aprobar un plan.
+- **`push` no**, y no por falta de tiempo: publicar es lo único de la cadena
+  que sale de la máquina y que no se deshace. Sigue siendo un acto deliberado
+  en consola. Hay un test que verifica que el endpoint NO existe, para que no
+  reaparezca por descuido.
+
+Tres guardas antes de tocar la rama de trabajo, todas con su porqué:
+
+1. **Solo ramas `devvating/`** — mismo criterio que ya regía para borrarlas.
+2. **Árbol limpio** — con cambios sin confirmar, un conflicto dejaría el merge
+   a medias, y desde el navegador no hay herramientas para resolverlo.
+3. **Sin ejecución abierta en esa rama** — es trabajo que el vocero todavía no
+   revisó; fusionarlo sería decidir por él.
+
+Ante conflicto, `gitutil.merge` dispara `merge --abort`: el árbol queda
+exactamente como estaba y el error se reporta entero. Verificado en real — sin
+marcas de conflicto, sin `MERGE_HEAD`, repositorio limpio.
+
+Con esto la consola queda para: lanzar el Hub, publicar, y registrar repos o
+inicializarlos con git (bloque 3, pendiente de debate porque choca con D3/D9).

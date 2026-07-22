@@ -279,6 +279,27 @@ def list_branches(repo: str, prefix: str = "devvating/") -> list[dict]:
     return ramas
 
 
+def merge(repo: str, branch: str) -> str:
+    """Fusiona `branch` en la rama actual. Devuelve el resumen de git.
+
+    Es la ÚNICA operación del Hub que escribe en la rama de trabajo del vocero
+    (todo lo demás vive en ramas `devvating/` o en worktrees desechables), así
+    que ante cualquier problema deshace: un conflicto dispara `merge --abort` y
+    el árbol queda exactamente como estaba, con el error explicado. Nunca deja
+    a medias un merge que el vocero tendría que resolver a mano desde la web,
+    donde no hay herramientas para hacerlo.
+    """
+    r = _run(["merge", "--no-edit", branch], repo)
+    if r.returncode != 0:
+        _run(["merge", "--abort"], repo)
+        detalle = (r.stdout + r.stderr).strip()
+        raise RuntimeError(
+            f"No se pudo fusionar '{branch}' (se deshizo, tu rama quedó intacta): "
+            f"{detalle}"
+        )
+    return r.stdout.strip()
+
+
 def ramas_sin_fusionar(repo: str, prefix: str = "devvating/") -> list[str]:
     """Ramas de ejecución cuyo trabajo aún no está en la rama actual.
 
