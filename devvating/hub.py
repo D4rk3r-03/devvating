@@ -6,7 +6,11 @@ Hub existe. Reutiliza `reporte.render_html` para ver debates pasados y
 `_save_transcript` para persistir igual que la CLI.
 
 Uso:
-    devvating hub [--port 8777] [--repo .]
+    devvating hub [--port 8777] [--repo .] [--repo otro/proyecto ...]
+
+Sirve uno o varios repositorios (fase B). El cliente los elige por un
+`repo_id` opaco de la lista blanca que se da de alta AQUÍ, al arrancar: el
+cuerpo de una petición nunca lleva rutas del disco (salvaguarda D9).
 
 Requiere el extra web:  pip install -e ".[hub]"
 El front vive en devvating-ui/ (Vite + React); `npm run build` genera el
@@ -19,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import queue
 import re
 import secrets
@@ -259,6 +264,7 @@ def _ejecucion_worker(
         "rama": resultado.branch,
         "rama_base": resultado.base_branch,
         "repo": config["repo"],
+        "repo_id": config.get("repo_id", ""),
         "worktree": resultado.worktree,
         "returncode": resultado.returncode,
         "archivos": resultado.changed_files,
@@ -267,12 +273,51 @@ def _ejecucion_worker(
     emitir({"tipo": "ejecucion_cerrada"})
 
 
+def id_de_repo(ruta: str) -> str:
+    """Identificador opaco y estable de un repo, derivado de su nombre.
+
+    Es lo ÚNICO que viaja por HTTP para referirse a un repositorio: el cuerpo
+    de una petición nunca lleva rutas (D9), así que un id desconocido se
+    rechaza en vez de resolverse contra el disco.
+    """
+    base = os.path.basename(os.path.abspath(ruta).rstrip(os.sep)) or "repo"
+    limpio = re.sub(r"[^\w.-]+", "-", base).strip("-").lower()
+    return limpio or "repo"
+
+
+def _roster_de_repos(repo: str, repos: list[str] | dict[str, str] | None) -> dict[str, str]:
+    """Lista blanca id → ruta absoluta. Se define FUERA del navegador.
+
+    Decisión D3 del vocero (2026-07-22): el roster es autónomo y se da de alta
+    solo por CLI, sin depender del índice global (que llega en la fase C). Ids
+    repetidos se desambiguan con sufijo para no ocultar un repo con otro.
+    """
+    if isinstance(repos, dict):
+        return {str(k): os.path.abspath(v) for k, v in repos.items()}
+    rutas = list(repos) if repos else [repo]
+    roster: dict[str, str] = {}
+    for ruta in rutas:
+        rid = id_de_repo(ruta)
+        if rid in roster:
+            n = 2
+            while f"{rid}-{n}" in roster:
+                n += 1
+            rid = f"{rid}-{n}"
+        roster[rid] = os.path.abspath(ruta)
+    return roster
+
+
 def crear_app(
     repo: str = ".",
     fabrica_par: Callable = banco.par,
     backend_ejecucion=None,
+    repos: list[str] | dict[str, str] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Devvating Hub")
+    # Repos servibles (fase B). Con uno solo el comportamiento es idéntico al
+    # de antes: quien no mande `repo_id` opera sobre el primero.
+    app.state.repos = _roster_de_repos(repo, repos)
+    repo_default = next(iter(app.state.repos))
     app.state.historial = []          # eventos del debate en curso/último
     app.state.clientes = set()        # websockets conectados
     app.state.corriendo = False
@@ -286,9 +331,10 @@ def crear_app(
     # y la leen el orquestador (entre turnos) y los adaptadores CLI (matan su
     # subprocess en vuelo). Se limpia al lanzar cada debate.
     app.state.cancelar_event = threading.Event()
-    # Última ejecución con cambios en staging, a la espera de que el vocero
-    # decida: commit en la rama o descartar. None = nada pendiente.
-    app.state.ultima_ejecucion = None
+    # Ejecuciones con cambios en staging a la espera de que el vocero decida
+    # (commit o descartar), UNA POR REPO: con varios repos servidos, la
+    # pendiente de uno no puede pisar la de otro. {} = nada pendiente.
+    app.state.ejecuciones = {}
     # Token anti-CSRF (paso 0, auto-auditoría): sin él, cualquier página abierta
     # en el mismo navegador podría disparar POST /api/ejecutar (y el resto de
     # endpoints mutantes) contra localhost vía fetch. Se genera por proceso, se
@@ -304,6 +350,25 @@ def crear_app(
 
     _csrf = Depends(_requiere_csrf)
 
+    def _ruta_repo(repo_id: str | None = None) -> str:
+        """Resuelve un `repo_id` contra la lista blanca. 404 si no está.
+
+        Aquí vive la salvaguarda D9 ampliada a multi-repo: el cliente elige
+        ENTRE los repos que el vocero registró al arrancar, nunca una ruta del
+        sistema de archivos. Un id ausente cae al primero (comportamiento
+        idéntico al del Hub de un solo repo).
+        """
+        rid = str(repo_id or repo_default)
+        ruta = app.state.repos.get(rid)
+        if ruta is None:
+            raise HTTPException(
+                404,
+                f"Repositorio '{rid}' no está registrado en este Hub. "
+                f"Disponibles: {', '.join(app.state.repos)}. "
+                "Se dan de alta al arrancar (devvating hub --repo …), nunca por HTTP.",
+            )
+        return ruta
+
     def _rehidratar_ejecucion() -> None:
         """Recupera la ejecución pendiente tras un reinicio (Fase A del plan).
 
@@ -317,26 +382,27 @@ def crear_app(
         pendientes se toma la más reciente; el resto siguen visibles en
         `/api/worktrees`.
         """
-        if not gitutil.is_git_repo(repo):
-            return
-        candidatas = []
-        for w in gitutil.list_worktrees(repo):
-            if not w["existe"] or not w["tiene_cambios"]:
+        for rid, ruta in app.state.repos.items():
+            if not gitutil.is_git_repo(ruta):
                 continue
-            side = gitutil.leer_sidecar(w["path"]) or {}
-            marca = side.get("terminado") or side.get("iniciado") or ""
-            candidatas.append((marca, w, side))
-        if not candidatas:
-            return
-        candidatas.sort(key=lambda c: c[0], reverse=True)
-        _, w, side = candidatas[0]
-        app.state.ultima_ejecucion = {
-            "rama": w["rama"],
-            "base": side.get("rama_base", ""),
-            "repo": repo,
-            "worktree": w["path"],
-            "returncode": side.get("returncode"),  # None => no se ofrece commit
-        }
+            candidatas = []
+            for w in gitutil.list_worktrees(ruta):
+                if not w["existe"] or not w["tiene_cambios"]:
+                    continue
+                side = gitutil.leer_sidecar(w["path"]) or {}
+                marca = side.get("terminado") or side.get("iniciado") or ""
+                candidatas.append((marca, w, side))
+            if not candidatas:
+                continue
+            candidatas.sort(key=lambda c: c[0], reverse=True)
+            _, w, side = candidatas[0]
+            app.state.ejecuciones[rid] = {
+                "rama": w["rama"],
+                "base": side.get("rama_base", ""),
+                "repo": ruta,
+                "worktree": w["path"],
+                "returncode": side.get("returncode"),  # None => no se ofrece commit
+            }
 
     @app.on_event("startup")
     async def _arrancar() -> None:
@@ -359,7 +425,7 @@ def crear_app(
                 # Guardamos el returncode: si el backend falló, el commit se
                 # bloquea (no presentar éxito sobre un plan roto — hallazgo de
                 # la auto-auditoría; el descarte sigue disponible).
-                app.state.ultima_ejecucion = {
+                app.state.ejecuciones[msg.get("repo_id", repo_default)] = {
                     "rama": msg["rama"], "base": msg.get("rama_base", ""),
                     "repo": msg["repo"], "worktree": msg.get("worktree", ""),
                     "returncode": msg.get("returncode", 0),
@@ -408,6 +474,12 @@ def crear_app(
             # El front lo guarda al montar y lo reenvía en cada POST mutante
             # (X-Devvating-CSRF). Ver _requiere_csrf.
             "csrf_token": app.state.csrf_token,
+            # Repos servibles: el front solo puede elegir entre estos ids, y
+            # se muestra la ruta para que el vocero sepa sobre qué opera.
+            "repos": [
+                {"id": rid, "ruta": ruta} for rid, ruta in app.state.repos.items()
+            ],
+            "repo_default": repo_default,
         }
 
     @app.get("/api/estado")
@@ -430,10 +502,15 @@ def crear_app(
         # Reanudar (resume): el tema, las pistas y el modo profundo vienen del
         # transcript parcial; los agentes se re-eligen (los adaptadores no se
         # serializan). El orquestador reusa los turnos ya pagados.
+        # El cuerpo elige un repo_id de la lista blanca, NUNCA una ruta: es la
+        # salvaguarda D9 con varios repos servidos (ver _ruta_repo).
+        repo_id = str(config.get("repo_id") or repo_default)
+        repo_objetivo = _ruta_repo(repo_id)
+
         old_session = None
         resume = str(config.get("resume") or "").strip()
         if resume:
-            old_session = _load_partial_session(str(_ruta_transcript(resume)))
+            old_session = _load_partial_session(str(_ruta_transcript(resume, repo_id)))
             config = {
                 **config,
                 "tema": old_session.topic.prompt,
@@ -444,9 +521,7 @@ def crear_app(
         tema = str(config.get("tema", "")).strip()
         if not tema:
             raise HTTPException(422, "Falta el tema del debate.")
-        # El Hub sirve UN solo repo (el del arranque); no se acepta override
-        # del cuerpo — sería aplicar/leer en rutas arbitrarias del disco.
-        config = {**config, "tema": tema, "repo": repo}
+        config = {**config, "tema": tema, "repo": repo_objetivo}
         app.state.corriendo = True
         app.state.historial = []
         app.state.cancelar_event.clear()  # empezamos sin cancelación pendiente
@@ -457,6 +532,7 @@ def crear_app(
             "interactivo": bool(config.get("interactivo", False)),
             "sesgos": [s for s in (config.get("sesgos") or []) if isinstance(s, str)],
             "reanudado": bool(resume),
+            "repo_id": repo_id,
         }})
         threading.Thread(
             target=_debate_worker,
@@ -497,7 +573,7 @@ def crear_app(
         verdad que usa el gate del executor.
         """
         nombre = str(cuerpo.get("transcript", ""))
-        ruta = _ruta_transcript(nombre)
+        ruta = _ruta_transcript(nombre, cuerpo.get("repo_id"))
         data = json.loads(ruta.read_text(encoding="utf-8"))
         resoluciones = {
             str(r.get("id")): r
@@ -528,7 +604,8 @@ def crear_app(
         if len(agentes) != 2:
             raise HTTPException(422, "Elige exactamente 2 agentes del roster.")
         nombre = str(cuerpo.get("transcript", ""))
-        ruta = _ruta_transcript(nombre)
+        repo_id = str(cuerpo.get("repo_id") or repo_default)
+        ruta = _ruta_transcript(nombre, repo_id)
         data = json.loads(ruta.read_text(encoding="utf-8"))
         old_session = _load_partial_session(str(ruta))
         if not old_session.turns:
@@ -536,7 +613,7 @@ def crear_app(
         ronda_cierre = old_session.rounds_run + 1
         tema = _prompt_cierre(old_session.topic.prompt, data.get("decisiones") or [])
         config = {
-            "tema": tema, "agentes": agentes, "repo": repo,
+            "tema": tema, "agentes": agentes, "repo": _ruta_repo(repo_id),
             "rounds": ronda_cierre, "min_rounds": ronda_cierre, "profundo": False,
             "sesgos": [s for s in (cuerpo.get("sesgos") or []) if isinstance(s, str)],
             "files": old_session.topic.context_hint or "",
@@ -547,7 +624,7 @@ def crear_app(
         _emitir({"tipo": "inicio", "config": {
             "tema": tema, "agentes": agentes, "rounds": ronda_cierre,
             "profundo": False, "interactivo": False, "sesgos": config["sesgos"],
-            "reanudado": True, "cierre": True,
+            "reanudado": True, "cierre": True, "repo_id": repo_id,
         }})
         threading.Thread(
             target=_debate_worker,
@@ -567,7 +644,8 @@ def crear_app(
         if app.state.ejecutando:
             raise HTTPException(409, "Ya hay una ejecución en curso.")
         nombre = str(cuerpo.get("transcript", ""))
-        data = json.loads(_ruta_transcript(nombre).read_text(encoding="utf-8"))
+        repo_id = str(cuerpo.get("repo_id") or repo_default)
+        data = json.loads(_ruta_transcript(nombre, repo_id).read_text(encoding="utf-8"))
         plan = str(data.get("synthesis", "")).strip()
         if not plan:
             raise HTTPException(422, "El transcript no contiene una síntesis.")
@@ -583,15 +661,17 @@ def crear_app(
                 "de ejecutar (o fuerza bajo tu riesgo). Pendientes: "
                 + "; ".join(p for p in pendientes if p),
             )
-        # Confinado al repo servido: NO se aplica un plan en una ruta arbitraria
-        # del cuerpo (agujero de escritura remota vía navegador — auto-auditoría).
-        repo_objetivo = repo
+        # Confinado a los repos REGISTRADOS: el cuerpo elige un id de la lista
+        # blanca, nunca una ruta del disco (agujero de escritura remota vía
+        # navegador — auto-auditoría D9, ampliada a multi-repo en la fase B).
+        repo_objetivo = _ruta_repo(repo_id)
         app.state.ejecutando = True
-        _emitir({"tipo": "ejecucion_inicio", "transcript": nombre, "repo": repo_objetivo})
+        _emitir({"tipo": "ejecucion_inicio", "transcript": nombre,
+                 "repo": repo_objetivo, "repo_id": repo_id})
         threading.Thread(
             target=_ejecucion_worker,
             args=(
-                {"plan": plan, "repo": repo_objetivo,
+                {"plan": plan, "repo": repo_objetivo, "repo_id": repo_id,
                  "titulo": data.get("topic", {}).get("prompt", "plan"),
                  "decisiones_pendientes": pendientes, "forzar_decisiones": forzar},
                 _emitir,
@@ -602,7 +682,7 @@ def crear_app(
         return {"ok": True}
 
     @app.get("/api/ejecucion-pendiente")
-    def ejecucion_pendiente() -> dict:
+    def ejecucion_pendiente(repo_id: str | None = None) -> dict:
         """La ejecución que espera decisión del vocero, con su diff.
 
         Existe para que la rehidratación del arranque sea VISIBLE: sin esto el
@@ -610,11 +690,14 @@ def crear_app(
         nada que commitear. El diff se lee del worktree en el momento, no de
         una copia guardada — git es la fuente.
         """
-        ue = app.state.ultima_ejecucion
+        rid = str(repo_id or repo_default)
+        _ruta_repo(rid)  # valida el id contra la lista blanca
+        ue = app.state.ejecuciones.get(rid)
         if not ue:
             return {"pendiente": None}
         wt = ue.get("worktree") or ue["repo"]
         return {"pendiente": {
+            "repo_id": rid,
             "rama": ue["rama"],
             "rama_base": ue.get("base", ""),
             "worktree": ue.get("worktree", ""),
@@ -631,7 +714,9 @@ def crear_app(
         esta acción explícita. Commitea en la propia rama de ejecución; el merge
         a la rama de trabajo lo hace el vocero cuando revisó.
         """
-        ue = app.state.ultima_ejecucion
+        rid = str(cuerpo.get("repo_id") or repo_default)
+        _ruta_repo(rid)
+        ue = app.state.ejecuciones.get(rid)
         if not ue:
             raise HTTPException(409, "No hay una ejecución lista para commitear.")
         if ue.get("returncode", 0) != 0:
@@ -652,52 +737,57 @@ def crear_app(
         # Commiteado: el worktree ya cumplió su función; se quita (la rama queda).
         if ue.get("worktree"):
             gitutil.remove_worktree(ue["repo"], ue["worktree"])
-        app.state.ultima_ejecucion = None
-        _emitir({"tipo": "commit_fin", "sha": sha, "rama": ue["rama"]})
+        app.state.ejecuciones.pop(rid, None)
+        _emitir({"tipo": "commit_fin", "sha": sha, "rama": ue["rama"], "repo_id": rid})
         return {"ok": True, "sha": sha}
 
     @app.post("/api/descartar", dependencies=[_csrf])
-    def descartar_cambios() -> dict:
+    def descartar_cambios(cuerpo: dict | None = None) -> dict:
         """Deshace la ejecución: quita el worktree aislado y borra su rama.
 
         No toca el árbol de trabajo del vocero (D9 paso 2): a diferencia del
         viejo `reset --hard`, aquí no hay nada que resetear en el árbol vivo.
         """
-        ue = app.state.ultima_ejecucion
+        rid = str((cuerpo or {}).get("repo_id") or repo_default)
+        _ruta_repo(rid)
+        ue = app.state.ejecuciones.get(rid)
         if not ue:
             raise HTTPException(409, "No hay una ejecución que descartar.")
         try:
             gitutil.discard_worktree(ue["repo"], ue.get("worktree", ""), ue["rama"])
         except RuntimeError as exc:
             raise HTTPException(422, str(exc))
-        app.state.ultima_ejecucion = None
-        _emitir({"tipo": "descartar_fin", "base": ue["base"], "rama": ue["rama"]})
+        app.state.ejecuciones.pop(rid, None)
+        _emitir({"tipo": "descartar_fin", "base": ue["base"], "rama": ue["rama"],
+                 "repo_id": rid})
         return {"ok": True}
 
     @app.get("/api/ramas")
-    def ramas() -> dict:
-        """Historial de ramas de ejecución (devvating/) del repo del Hub."""
-        if not gitutil.is_git_repo(repo):
+    def ramas(repo_id: str | None = None) -> dict:
+        """Historial de ramas de ejecución (devvating/) del repo elegido."""
+        ruta = _ruta_repo(repo_id)
+        if not gitutil.is_git_repo(ruta):
             return {"ramas": [], "actual": None}
-        actual = gitutil.current_branch(repo)
-        lista = gitutil.list_branches(repo)
+        actual = gitutil.current_branch(ruta)
+        lista = gitutil.list_branches(ruta)
         for r in lista:
             r["actual"] = r["nombre"] == actual
         return {"ramas": lista, "actual": actual}
 
     @app.get("/api/worktrees")
-    def worktrees() -> dict:
+    def worktrees(repo_id: str | None = None) -> dict:
         """Worktrees de ejecución que quedaron colgando, con lo que decide.
 
         `tiene_cambios` marca los que perderían trabajo si se retiran (la rama
         y sus commits sobreviven siempre; lo sin commitear, no). Los huérfanos
         van aparte: su repo padre ya no existe, así que ningún repo los ve.
         """
-        if not gitutil.is_git_repo(repo):
+        ruta = _ruta_repo(repo_id)
+        if not gitutil.is_git_repo(ruta):
             return {"worktrees": [], "huerfanos": []}
-        gitutil.prune_worktrees(repo)
+        gitutil.prune_worktrees(ruta)
         return {
-            "worktrees": gitutil.list_worktrees(repo),
+            "worktrees": gitutil.list_worktrees(ruta),
             "huerfanos": [
                 Path(h).name for h in gitutil.worktrees_huerfanos(base_worktrees())
             ],
@@ -710,21 +800,25 @@ def crear_app(
         Sin `forzar`, los que tienen cambios sin commitear se conservan: es
         trabajo que el vocero aún no revisó y quitarlos lo perdería.
         """
-        if not gitutil.is_git_repo(repo):
-            raise HTTPException(422, f"'{repo}' no es un repositorio git.")
+        rid = str(cuerpo.get("repo_id") or repo_default)
+        ruta = _ruta_repo(rid)
+        if not gitutil.is_git_repo(ruta):
+            raise HTTPException(422, f"'{ruta}' no es un repositorio git.")
         forzar = bool(cuerpo.get("forzar"))
-        gitutil.prune_worktrees(repo)
+        gitutil.prune_worktrees(ruta)
         candidatos = [
-            w for w in gitutil.list_worktrees(repo)
+            w for w in gitutil.list_worktrees(ruta)
             if not w["tiene_cambios"] or forzar
         ]
         # La ejecución pendiente de decisión NO se toca ni con forzar: sus
         # cambios son justo los que el vocero está mirando, y retirarla dejaría
         # los botones de commit/descartar apuntando a un directorio borrado.
-        pendiente = (app.state.ultima_ejecucion or {}).get("worktree", "")
+        pendiente = (app.state.ejecuciones.get(rid) or {}).get("worktree", "")
         retirados = [w for w in candidatos if w["path"] != pendiente]
         for w in retirados:
-            gitutil.remove_worktree(repo, w["path"])
+            gitutil.remove_worktree(ruta, w["path"])
+        # Los huérfanos son globales (su repo padre ya no existe), así que se
+        # recogen una vez y no por repo.
         huerfanos = gitutil.worktrees_huerfanos(base_worktrees())
         for h in huerfanos:
             shutil.rmtree(h, ignore_errors=True)
@@ -733,7 +827,7 @@ def crear_app(
             "retirados": len(retirados),
             "huerfanos": len(huerfanos),
             "conservados": [
-                w["rama"] for w in gitutil.list_worktrees(repo)
+                w["rama"] for w in gitutil.list_worktrees(ruta)
             ],
         }
 
@@ -741,26 +835,27 @@ def crear_app(
     def borrar_rama(cuerpo: dict) -> dict:
         """Borra una rama de ejecución. Solo devvating/, nunca la rama actual."""
         nombre = str(cuerpo.get("rama") or "")
+        ruta = _ruta_repo(cuerpo.get("repo_id"))
         if not nombre.startswith("devvating/"):
             raise HTTPException(422, "Solo se pueden borrar ramas de ejecución (devvating/).")
-        if not gitutil.is_git_repo(repo):
-            raise HTTPException(422, f"'{repo}' no es un repositorio git.")
-        if nombre == gitutil.current_branch(repo):
+        if not gitutil.is_git_repo(ruta):
+            raise HTTPException(422, f"'{ruta}' no es un repositorio git.")
+        if nombre == gitutil.current_branch(ruta):
             raise HTTPException(
                 409, "No puedes borrar la rama en la que estás. Cambia de rama primero."
             )
         try:
-            gitutil.delete_branch(repo, nombre)
+            gitutil.delete_branch(ruta, nombre)
         except RuntimeError as exc:
             raise HTTPException(422, str(exc))
         return {"ok": True}
 
-    def _dir_transcripts() -> Path:
-        return Path(repo) / "transcripts"
+    def _dir_transcripts(repo_id: str | None = None) -> Path:
+        return Path(_ruta_repo(repo_id)) / "transcripts"
 
     @app.get("/api/transcripts")
-    def transcripts() -> dict:
-        carpeta = _dir_transcripts()
+    def transcripts(repo_id: str | None = None) -> dict:
+        carpeta = _dir_transcripts(repo_id)
         if not carpeta.is_dir():
             return {"transcripts": []}
         archivos = sorted(
@@ -768,22 +863,30 @@ def crear_app(
         )
         return {"transcripts": archivos}
 
-    def _ruta_transcript(nombre: str) -> Path:
+    def _ruta_transcript(nombre: str, repo_id: str | None = None) -> Path:
+        """Transcript de un repo REGISTRADO, confinado a su carpeta.
+
+        Doble cierre: el nombre pasa por una regex estricta y la ruta resuelta
+        debe caer exactamente en `<repo>/transcripts` — así ni un `..` ni un
+        symlink sacan la lectura de ahí. El repo se elige por id, nunca por
+        ruta (D9).
+        """
         if not _NOMBRE_TRANSCRIPT_RE.match(nombre):
             raise HTTPException(404, "Transcript no encontrado.")
-        ruta = (_dir_transcripts() / nombre).resolve()
-        if ruta.parent != _dir_transcripts().resolve() or not ruta.is_file():
+        carpeta = _dir_transcripts(repo_id)
+        ruta = (carpeta / nombre).resolve()
+        if ruta.parent != carpeta.resolve() or not ruta.is_file():
             raise HTTPException(404, "Transcript no encontrado.")
         return ruta
 
     @app.get("/api/transcripts/{nombre}/html")
-    def transcript_html(nombre: str) -> HTMLResponse:
-        data = json.loads(_ruta_transcript(nombre).read_text(encoding="utf-8"))
+    def transcript_html(nombre: str, repo_id: str | None = None) -> HTMLResponse:
+        data = json.loads(_ruta_transcript(nombre, repo_id).read_text(encoding="utf-8"))
         return HTMLResponse(reporte.render_html(data))
 
     @app.get("/api/transcripts/{nombre}")
-    def transcript_json(nombre: str) -> dict:
-        return json.loads(_ruta_transcript(nombre).read_text(encoding="utf-8"))
+    def transcript_json(nombre: str, repo_id: str | None = None) -> dict:
+        return json.loads(_ruta_transcript(nombre, repo_id).read_text(encoding="utf-8"))
 
     # ------------------------------------------------------------ Websocket
     @app.websocket("/ws")
@@ -820,14 +923,21 @@ def main(argv: list[str] | None = None) -> int:
         prog="devvating hub", description="Sala de debate web local."
     )
     parser.add_argument("--port", type=int, default=8777)
-    parser.add_argument("--repo", default=".", help="Raíz del repo a debatir.")
+    parser.add_argument(
+        "--repo", action="append", default=None,
+        help="Raíz de un repo a servir. Repetible: --repo a --repo b. Los repos "
+             "se dan de alta AQUÍ y nunca por HTTP (decisión D3 del vocero).",
+    )
     args = parser.parse_args(argv)
 
     import uvicorn
 
-    print(f"Devvating Hub → http://127.0.0.1:{args.port}  (repo: {args.repo})")
-    uvicorn.run(crear_app(repo=args.repo), host="127.0.0.1", port=args.port,
-                log_level="warning")
+    rutas = args.repo or ["."]
+    app = crear_app(repos=rutas)
+    print(f"Devvating Hub → http://127.0.0.1:{args.port}")
+    for rid, ruta in app.state.repos.items():
+        print(f"  · {rid}: {ruta}")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
 

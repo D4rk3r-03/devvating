@@ -905,7 +905,8 @@ class TestWorktreesEnElHub:
         # apuntando a un directorio borrado.
         c, app, git_repo = hub_git
         pendiente = self._worktree(git_repo, "devvating/pendiente", sucio=True)
-        app.state.ultima_ejecucion = {
+        rid = next(iter(app.state.repos))
+        app.state.ejecuciones[rid] = {
             "rama": "devvating/pendiente", "base": "main",
             "repo": str(git_repo), "worktree": pendiente, "returncode": 0,
         }
@@ -1027,3 +1028,119 @@ class TestRehidratarEjecucion:
     def test_repo_sin_ejecuciones_responde_vacio(self, cliente):
         c, _ = cliente
         assert c.get("/api/ejecucion-pendiente").json() == {"pendiente": None}
+
+
+class TestMultiRepo:
+    """Fase B: varios repos servidos, elegidos por `repo_id` opaco.
+
+    La salvaguarda D9 se amplía en vez de relajarse: el cliente elige ENTRE los
+    repos que el vocero registró al arrancar; una ruta del sistema en el cuerpo
+    no lleva a ninguna parte.
+    """
+
+    @pytest.fixture
+    def dos_repos(self, tmp_path, monkeypatch):
+        import subprocess
+
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        rutas = {}
+        for nombre in ("alfa", "beta"):
+            r = tmp_path / nombre
+            r.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=r, check=True)
+            subprocess.run(["git", "config", "user.email", "t@t"], cwd=r, check=True)
+            subprocess.run(["git", "config", "user.name", "T"], cwd=r, check=True)
+            (r / f"{nombre}.txt").write_text("x\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=r, check=True)
+            subprocess.run(["git", "commit", "-qm", "inicial"], cwd=r, check=True)
+            (r / "transcripts").mkdir()
+            # Con síntesis: es lo que /api/ejecutar aplica como plan.
+            (r / "transcripts" / f"20260101-000000-{nombre}.json").write_text(
+                json.dumps({
+                    "topic": {"prompt": f"plan de {nombre}", "context_hint": ""},
+                    "turns": [], "rounds_run": 1, "converged": True,
+                    "synthesis": f"Aplica el plan de {nombre}.",
+                    "synthesizer": "claude", "decisiones": [],
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            rutas[nombre] = str(r)
+        app = crear_app(repos=list(rutas.values()), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            yield c, app, rutas
+
+    def test_roster_publica_los_repos_servidos(self, dos_repos):
+        c, _, rutas = dos_repos
+        r = c.get("/api/roster").json()
+        assert [x["id"] for x in r["repos"]] == ["alfa", "beta"]
+        assert r["repo_default"] == "alfa"
+
+    def test_cada_repo_ve_solo_sus_transcripts(self, dos_repos):
+        c, _, _ = dos_repos
+        assert c.get("/api/transcripts", params={"repo_id": "alfa"}).json()["transcripts"] \
+            == ["20260101-000000-alfa.json"]
+        assert c.get("/api/transcripts", params={"repo_id": "beta"}).json()["transcripts"] \
+            == ["20260101-000000-beta.json"]
+
+    def test_sin_repo_id_opera_sobre_el_primero(self, dos_repos):
+        c, _, _ = dos_repos
+        assert c.get("/api/transcripts").json()["transcripts"] \
+            == ["20260101-000000-alfa.json"]
+
+    def test_repo_id_desconocido_se_rechaza(self, dos_repos):
+        c, _, _ = dos_repos
+        r = c.get("/api/transcripts", params={"repo_id": "gamma"})
+        assert r.status_code == 404 and "no está registrado" in r.json()["detail"]
+
+    def test_una_ruta_del_disco_como_repo_id_no_resuelve(self, dos_repos, tmp_path):
+        # El corazón de D9: aunque el atacante conozca la ruta, no es un id.
+        c, _, rutas = dos_repos
+        for intento in [rutas["beta"], "/etc", "../beta", str(tmp_path)]:
+            r = c.get("/api/transcripts", params={"repo_id": intento})
+            assert r.status_code == 404, f"{intento} no debería resolver"
+
+    def test_ejecutar_en_el_repo_elegido_y_no_en_otro(self, dos_repos):
+        c, app, rutas = dos_repos
+
+        class Backend:
+            name = "stub"
+
+            def run(self, prompt, cwd, allow_commands):
+                (Path(cwd) / "aplicado.txt").write_text("x\n", encoding="utf-8")
+                return 0, "ok"
+
+        app_beta = crear_app(repos=list(rutas.values()), fabrica_par=_fabrica_stub,
+                             backend_ejecucion=Backend())
+        with TestClient(app_beta) as cb:
+            cb.headers["X-Devvating-CSRF"] = app_beta.state.csrf_token
+            r = cb.post("/api/ejecutar", json={
+                "transcript": "20260101-000000-beta.json", "repo_id": "beta",
+            })
+            assert r.status_code == 202
+            for _ in range(100):
+                if not cb.get("/api/estado").json()["ejecutando"]:
+                    break
+                time.sleep(0.05)
+            # La pendiente quedó en beta; alfa sigue sin nada.
+            assert cb.get("/api/ejecucion-pendiente",
+                          params={"repo_id": "beta"}).json()["pendiente"]
+            assert cb.get("/api/ejecucion-pendiente",
+                          params={"repo_id": "alfa"}).json()["pendiente"] is None
+
+    def test_ids_repetidos_se_desambiguan(self, tmp_path):
+        # Dos repos distintos con el mismo basename no pueden ocultarse.
+        a = tmp_path / "uno" / "proyecto"
+        b = tmp_path / "dos" / "proyecto"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        app = crear_app(repos=[str(a), str(b)])
+        assert list(app.state.repos) == ["proyecto", "proyecto-2"]
+        assert app.state.repos["proyecto"] != app.state.repos["proyecto-2"]
+
+    def test_un_solo_repo_se_comporta_como_antes(self, tmp_path):
+        # Compatibilidad: crear_app(repo=...) sigue funcionando sin repo_id.
+        app = crear_app(repo=str(tmp_path))
+        with TestClient(app) as c:
+            assert c.get("/api/transcripts").json() == {"transcripts": []}
+            assert len(app.state.repos) == 1

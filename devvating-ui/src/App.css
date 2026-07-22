@@ -463,3 +463,14 @@ pre.diff .hunk { color: var(--accent); }
 }
 .reanudar:hover:not(:disabled) { filter: brightness(1.15); }
 .reanudar:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Selector de repo (fase B): solo visible con más de uno servido. */
+.selector-repo {
+  width: 100%; padding: .35rem .5rem; font-size: .8rem;
+  background: var(--bg-input, transparent); color: var(--text-main);
+  border: 1px solid var(--border-color); border-radius: 6px;
+}
+.ruta-repo {
+  margin-top: .3rem; font-size: .68rem; color: var(--text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

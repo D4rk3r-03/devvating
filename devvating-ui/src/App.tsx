@@ -46,6 +46,7 @@ type Worktree = { path: string; rama: string; existe: boolean; tiene_cambios: bo
 // Un debate leído del disco (transcript). Lo mismo que el evento `fin` ofrece
 // en vivo, pero recuperable en cualquier momento: reiniciar el Hub ya no
 // cuesta perder el plan ni la posibilidad de aplicarlo.
+type RepoServido = { id: string; ruta: string };
 type Recuperada = {
   rama: string; rama_base: string; worktree: string;
   returncode: number | null; archivos: string[]; diff: string;
@@ -117,7 +118,7 @@ function Pendiente(
 // devuelve qué decisiones cruciales siguen pendientes (gatean la ejecución).
 function PanelDecisiones({ decisiones, transcript, post, onResuelto }: {
   decisiones: Decision[]; transcript: string;
-  post: (u: string, b?: unknown) => Promise<Response>;
+  post: (u: string, b?: Record<string, unknown>) => Promise<Response>;
   onResuelto: (pendientes: string[]) => void;
 }) {
   const [elec, setElec] = useState<Record<string, string>>({});
@@ -228,6 +229,10 @@ export default function App() {
   // la reconstruye de git + sidecar al arrancar; aquí se pide para que sea
   // VISIBLE, no solo commiteable. `returncode: null` = no se sabe cómo terminó.
   const [recuperada, setRecuperada] = useState<Recuperada | null>(null);
+  // Repos servidos y cuál está activo. El front solo maneja IDS opacos: las
+  // rutas se muestran, pero nunca viajan de vuelta al servidor (D9).
+  const [repos, setRepos] = useState<RepoServido[]>([]);
+  const [repoId, setRepoId] = useState("");
 
   const [tema, setTema] = useState("");
   const [files, setFiles] = useState("");
@@ -254,19 +259,26 @@ export default function App() {
   );
 
   // POST mutante con el token CSRF adjunto (ver _requiere_csrf en hub.py).
-  const post = (url: string, body?: unknown) =>
+  // Todo POST mutante lleva el repo activo por ID. Nunca una ruta: el
+  // servidor la resuelve contra su lista blanca (D9).
+  const post = (url: string, body?: Record<string, unknown>) =>
     fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Devvating-CSRF": csrfToken },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify({ repo_id: repoId, ...body }),
     });
 
-  const cargarTranscripts = () =>
-    fetch("/api/transcripts").then((r) => r.json())
-      .then((d) => setTranscripts(d.transcripts));
+  // Idem para los GET, por query string.
+  const conRepo = (url: string) =>
+    repoId ? `${url}${url.includes("?") ? "&" : "?"}repo_id=${encodeURIComponent(repoId)}` : url;
 
-  const cargarRamas = () =>
-    fetch("/api/ramas").then((r) => r.json()).then((d) => setRamas(d.ramas ?? []));
+  const cargarTranscripts = (rid = repoId) =>
+    fetch(rid ? `/api/transcripts?repo_id=${encodeURIComponent(rid)}` : "/api/transcripts")
+      .then((r) => r.json()).then((d) => setTranscripts(d.transcripts));
+
+  const cargarRamas = (rid = repoId) =>
+    fetch(rid ? `/api/ramas?repo_id=${encodeURIComponent(rid)}` : "/api/ramas")
+      .then((r) => r.json()).then((d) => setRamas(d.ramas ?? []));
 
   const borrarRama = async (nombre: string) => {
     if (!window.confirm(`¿Borrar la rama ${nombre}? Se pierde lo que no hayas fusionado.`))
@@ -279,7 +291,7 @@ export default function App() {
   // Abre un debate del historial con todas sus acciones vivas (ejecutar,
   // resolver decisiones, cerrar plan, reanudar si quedó a medias).
   const abrirArchivado = async (nombre: string) => {
-    const r = await fetch(`/api/transcripts/${encodeURIComponent(nombre)}`);
+    const r = await fetch(conRepo(`/api/transcripts/${encodeURIComponent(nombre)}`));
     if (!r.ok) { setAviso("No se pudo leer el transcript."); return; }
     const d = await r.json();
     const decisiones: Decision[] = d.decisiones ?? [];
@@ -300,14 +312,24 @@ export default function App() {
     );
   };
 
-  const cargarWorktrees = () =>
-    fetch("/api/worktrees").then((r) => r.json()).then((d) => {
-      setWorktrees(d.worktrees ?? []); setHuerfanos(d.huerfanos ?? []);
-    });
+  const cargarWorktrees = (rid = repoId) =>
+    fetch(rid ? `/api/worktrees?repo_id=${encodeURIComponent(rid)}` : "/api/worktrees")
+      .then((r) => r.json()).then((d) => {
+        setWorktrees(d.worktrees ?? []); setHuerfanos(d.huerfanos ?? []);
+      });
 
-  const cargarRecuperada = () =>
-    fetch("/api/ejecucion-pendiente").then((r) => r.json())
-      .then((d) => setRecuperada(d.pendiente ?? null));
+  const cargarRecuperada = (rid = repoId) =>
+    fetch(rid ? `/api/ejecucion-pendiente?repo_id=${encodeURIComponent(rid)}`
+              : "/api/ejecucion-pendiente")
+      .then((r) => r.json()).then((d) => setRecuperada(d.pendiente ?? null));
+
+  // Cambiar de repo: se recarga todo lo que es propio de cada uno y se cierra
+  // el debate archivado abierto (pertenece al repo anterior).
+  const cambiarRepo = (rid: string) => {
+    setRepoId(rid);
+    setArchivado(null); setPendientesArchivado([]);
+    cargarTranscripts(rid); cargarRamas(rid); cargarWorktrees(rid); cargarRecuperada(rid);
+  };
 
   // `forzar` incluye los que tienen cambios sin commitear: eso SÍ se pierde,
   // así que va detrás de una confirmación aparte y explícita.
@@ -334,6 +356,8 @@ export default function App() {
     fetch("/api/roster").then((r) => r.json()).then((d) => {
       setRoster(d.agentes); setAlias(d.alias); setSesgosDisp(d.sesgos ?? []);
       setCsrfToken(d.csrf_token ?? "");
+      setRepos(d.repos ?? []);
+      setRepoId(d.repo_default ?? "");
     });
     cargarTranscripts();
     cargarRamas();
@@ -545,6 +569,24 @@ export default function App() {
         </header>
 
         <div className="sidebar-scroll">
+          {/* Selector de repo: solo aparece si el Hub sirve más de uno. Con uno
+              solo la interfaz es idéntica a la de antes. */}
+          {repos.length > 1 && (
+            <section className="sidebar-seccion">
+              <h2 className="titulo-lista"><Boxes size={13} /> Repositorio</h2>
+              <select className="selector-repo" value={repoId} disabled={corriendo || ejecutando}
+                onChange={(e) => cambiarRepo(e.target.value)}
+                title={repos.find((r) => r.id === repoId)?.ruta}>
+                {repos.map((r) => (
+                  <option key={r.id} value={r.id}>{r.id}</option>
+                ))}
+              </select>
+              <p className="ruta-repo" title={repos.find((r) => r.id === repoId)?.ruta}>
+                {repos.find((r) => r.id === repoId)?.ruta}
+              </p>
+            </section>
+          )}
+
           <section className="sidebar-seccion">
             <h2 className="titulo-lista"><Play size={13} /> Nuevo debate</h2>
             <label>Tema del debate
@@ -619,7 +661,7 @@ export default function App() {
                     {t.replace(/\.partial\.json$|\.json$/, "").slice(16)}
                     {t.endsWith(".partial.json") && <span className="etiqueta-parcial">a medias</span>}
                   </button>
-                  <a href={`/api/transcripts/${encodeURIComponent(t)}/html`} target="_blank"
+                  <a href={conRepo(`/api/transcripts/${encodeURIComponent(t)}/html`)} target="_blank"
                     rel="noreferrer" className="ver-html" title="Abrir el reporte completo">
                     <FileText size={12} />
                   </a>
@@ -830,7 +872,7 @@ export default function App() {
               )}
 
               <footer>
-                <a href={`/api/transcripts/${encodeURIComponent(archivado.nombre)}/html`}
+                <a href={conRepo(`/api/transcripts/${encodeURIComponent(archivado.nombre)}/html`)}
                   target="_blank" rel="noreferrer" className="ver-reporte">
                   <FileText size={14} /> reporte completo
                 </a>
@@ -891,7 +933,7 @@ export default function App() {
                     {u.cost_usd != null && ` · $${u.cost_usd.toFixed(4)}`}
                   </span>
                 ))}
-                <a href={`/api/transcripts/${encodeURIComponent(fin.transcript)}/html`}
+                <a href={conRepo(`/api/transcripts/${encodeURIComponent(fin.transcript)}/html`)}
                   target="_blank" rel="noreferrer" className="ver-reporte">
                   <FileText size={14} /> reporte completo
                 </a>

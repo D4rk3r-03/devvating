@@ -69,6 +69,8 @@ devvating limpiar --repo /path/to/project
 pip install -e ".[hub]"
 cd devvating-ui && npm install && npm run build && cd ..
 devvating hub          # → http://127.0.0.1:8777
+# Serve several projects at once (pick one from the UI):
+devvating hub --repo ~/work/api --repo ~/work/web
 ```
 
 Every debate prints the synthesis (agreements / open disagreements / plan),

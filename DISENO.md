@@ -628,3 +628,26 @@ Pendientes de las fases B y C del mismo plan: multi-repo por `repo_id` contra
 lista blanca (roster autónomo por CLI, decisión D3 del vocero) e índice global
 de ejecuciones en `~/.devvating/` como punteros reconstruibles, nunca como
 reemplazo de los transcripts junto a su repo.
+
+### D12 — Multi-repo en el Hub por `repo_id` (fase B de D11, 2026-07-22)
+
+El Hub servía UN repositorio, el de su arranque, así que trabajar en otro
+proyecto obligaba a reiniciarlo. La fase B lo abre sin tocar la salvaguarda de
+D9, que prohíbe aceptar rutas del sistema en el cuerpo de una petición.
+
+- **Lista blanca dada de alta por CLI** (decisión D3 del vocero): `devvating
+  hub --repo a --repo b`. El roster es autónomo y no depende del índice global
+  (fase C), que llegaría después y habría invertido el orden acordado.
+- **El cliente elige por `repo_id` opaco**, derivado del nombre del directorio
+  y desambiguado con sufijo si dos repos comparten basename. Una ruta como id
+  no resuelve: se responde 404. Verificado en real con `/tmp/...`, `/etc`,
+  `../beta` y rutas escapadas.
+- **Estado por repo**: `app.state.ejecuciones` es un dict `repo_id → ejecución
+  pendiente`, no un escalar. La ejecución de un repo no puede pisar la de otro,
+  y la rehidratación del arranque (D11) recorre todos los registrados.
+- **Compatibilidad**: `crear_app(repo=...)` con uno solo se comporta igual que
+  antes y el selector ni aparece en la UI. Quien no manda `repo_id` opera sobre
+  el primero.
+
+Queda pendiente la fase C: índice global en `~/.devvating/` como punteros
+reconstruibles a los transcripts, que siguen viviendo junto a su repo.

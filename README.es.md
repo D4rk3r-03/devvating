@@ -69,6 +69,8 @@ devvating limpiar --repo /ruta/al/proyecto
 pip install -e ".[hub]"
 cd devvating-ui && npm install && npm run build && cd ..
 devvating hub          # → http://127.0.0.1:8777
+# Varios proyectos a la vez (se eligen desde la interfaz):
+devvating hub --repo ~/trabajo/api --repo ~/trabajo/web
 ```
 
 Cada debate imprime la síntesis (acuerdos / desacuerdos abiertos / plan), un
