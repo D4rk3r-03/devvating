@@ -342,3 +342,63 @@ class TestSidecarDeEjecucion:
     def test_leer_sidecar_sin_worktree_da_none(self, git_repo, tmp_path):
         assert gitutil.leer_sidecar(str(tmp_path)) is None
         assert gitutil.gitdir_de_worktree(str(git_repo)) is None  # no es worktree
+
+
+class TestCorrespondencia:
+    """Guarda determinista plan↔diff: primera línea del auditor acordado en el
+    debate del 2026-07-22. Sin modelo, sin coste y sin alucinar."""
+
+    def test_caza_el_caso_real_que_lo_motivo(self):
+        # Plan de 4 ediciones sobre documentación; la ejecución tocó un .log.
+        from devvating.executor import correspondencia
+
+        plan = ("1. `06-Montaje-Paso-a-Paso.md` → §0 añadir checkbox.\n"
+                "2. `06-Montaje-Paso-a-Paso.md` → §2 callout.\n"
+                "3. `00-README.md` → índice: añadir `lab/`.\n"
+                "4. `00-README.md` → anexo con la salida de run_all.sh.")
+        c = correspondencia(plan, ["lab/mock_logicapp_datadog.log"])
+        assert c["sospechoso"] is True
+        assert c["tocados_no_previstos"] == ["lab/mock_logicapp_datadog.log"]
+
+    def test_una_ejecucion_fiel_no_levanta_sospecha(self):
+        from devvating.executor import correspondencia
+
+        plan = "Edita `06-Montaje-Paso-a-Paso.md` y `00-README.md`."
+        c = correspondencia(plan, ["06-Montaje-Paso-a-Paso.md", "00-README.md"])
+        assert c["sospechoso"] is False and c["tocados_no_previstos"] == []
+
+    def test_reconoce_el_archivo_aunque_el_plan_no_traiga_la_ruta_entera(self):
+        # El plan suele nombrar `main.py`; el diff devuelve `src/main.py`.
+        from devvating.executor import correspondencia
+
+        c = correspondencia("Modifica `main.py` para añadir el flag.", ["src/main.py"])
+        assert c["sospechoso"] is False
+
+    def test_sin_cambios_no_es_sospechoso(self):
+        # Que el ejecutor no produjera nada es otro problema, no este.
+        from devvating.executor import correspondencia
+
+        assert correspondencia("Edita `a.md`.", [])["sospechoso"] is False
+
+    def test_plan_sin_rutas_marca_todo_lo_tocado(self):
+        # Un plan en prosa pura no permite verificar nada: se dice, no se calla.
+        from devvating.executor import correspondencia
+
+        c = correspondencia("Mejora la documentación del proyecto.", ["README.md"])
+        assert c["tocados_no_previstos"] == ["README.md"]
+
+    def test_el_outcome_y_el_sidecar_la_llevan(self, git_repo):
+        ex = Executor(str(git_repo), WriterBackend())
+        out = ex.execute(PLAN)   # PLAN nombra hola.txt; el backend toca nuevo.txt
+        assert out.correspondencia["tocados_no_previstos"] == ["nuevo.txt"]
+        assert out.correspondencia["sospechoso"] is True
+        # Y viaja en el sidecar, así que sobrevive a un reinicio del Hub.
+        side = gitutil.leer_sidecar(out.worktree)
+        assert side["correspondencia"]["tocados_no_previstos"] == ["nuevo.txt"]
+
+    def test_emite_evento_cuando_es_dudosa(self, git_repo):
+        eventos = []
+        ex = Executor(str(git_repo), WriterBackend(),
+                      on_event=lambda ev, val: eventos.append((ev, val)))
+        ex.execute(PLAN)
+        assert any(ev == "correspondencia_dudosa" for ev, _ in eventos)

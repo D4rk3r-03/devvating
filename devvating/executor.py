@@ -12,6 +12,7 @@ herramientas de entorno probadas. El ejecutor añade la envoltura de seguridad:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -78,6 +79,9 @@ class ExecutionOutcome:
     # iteración del mismo backend, con la salida del fallo como contexto).
     # verify_returncode/verify_output quedan con el resultado tras corregir.
     verify_corrected: bool = False
+    # Cruce determinista plan↔diff (ver `correspondencia`). Señal para el
+    # vocero, no veredicto: nadie bloquea por esto todavía.
+    correspondencia: dict = field(default_factory=dict)
 
 
 EventCb = Callable[[str, str], None]
@@ -94,6 +98,51 @@ def base_worktrees() -> str:
     return os.environ.get("DEVVATING_WORKTREE_DIR") or os.path.join(
         tempfile.gettempdir(), "devvating-worktrees"
     )
+
+
+# Rutas nombradas en un plan: `archivo.ext`, con o sin directorios delante y
+# con o sin comillas invertidas. Deliberadamente conservador — de lo que no
+# reconozca no se dirá nada, y una señal ausente es preferible a una falsa.
+_RUTA_EN_PLAN_RE = re.compile(r"[\w./-]*\w+\.[A-Za-z][\w]{0,9}\b")
+
+
+def correspondencia(plan_text: str, changed_files: list[str]) -> dict:
+    """Cruza lo que el plan NOMBRA con lo que la ejecución TOCÓ.
+
+    Primera línea de defensa acordada en el debate del auditor (2026-07-22):
+    determinista, sin modelo y sin coste, antes de preguntarle a nadie. El caso
+    que lo motivó —un plan de cuatro ediciones sobre documentación que terminó
+    tocando un único `.log` sin relación— se habría marcado aquí.
+
+    Devuelve `tocados_no_previstos` (en el diff pero no en el plan) y
+    `previstos_no_tocados` (nombrados en el plan y sin cambios). Ninguna de las
+    dos prueba nada por sí sola: un plan puede describir un archivo sin pedir
+    que cambie, y una ejecución legítima puede tocar un archivo que el plan no
+    nombró. Son SEÑALES para que el vocero mire, no un veredicto.
+    """
+    nombradas = {m.group(0).lstrip("./") for m in _RUTA_EN_PLAN_RE.finditer(plan_text)}
+    # Un plan suele nombrar `06-Montaje.md` y el diff devolver la ruta completa;
+    # se comparan también por nombre de archivo para no inventar discrepancias.
+    bases_nombradas = {os.path.basename(n) for n in nombradas}
+
+    def esta_prevista(ruta: str) -> bool:
+        return (ruta in nombradas or os.path.basename(ruta) in bases_nombradas
+                or any(ruta.endswith(n) or n.endswith(ruta) for n in nombradas))
+
+    tocados_no_previstos = [f for f in changed_files if not esta_prevista(f)]
+    cambiados_base = {os.path.basename(f) for f in changed_files}
+    previstos_no_tocados = sorted(
+        n for n in nombradas
+        if os.path.basename(n) not in cambiados_base
+        and not any(f.endswith(n) for f in changed_files)
+    )
+    return {
+        "tocados_no_previstos": sorted(tocados_no_previstos),
+        # Solo informativo: el plan nombra archivos que lee o cita, no solo los
+        # que pide cambiar, así que esta lista casi nunca está vacía.
+        "previstos_no_tocados": previstos_no_tocados,
+        "sospechoso": bool(tocados_no_previstos) and bool(changed_files),
+    }
 
 
 def _exec_prompt(plan: ExecutionPlan) -> str:
@@ -265,6 +314,13 @@ class Executor:
         changed = gitutil.staged_changed_files(worktree)
         self._on_event("diff_listo", str(len(changed)))
 
+        corresp = correspondencia(plan.text, changed)
+        if corresp["sospechoso"]:
+            self._on_event(
+                "correspondencia_dudosa",
+                ", ".join(corresp["tocados_no_previstos"][:5]),
+            )
+
         verify_returncode: int | None = None
         verify_output = ""
         verify_corrected = False
@@ -286,6 +342,7 @@ class Executor:
                 gitutil.stage_all(worktree)
                 diff = gitutil.staged_diff(worktree)
                 changed = gitutil.staged_changed_files(worktree)
+                corresp = correspondencia(plan.text, changed)  # la corrección cambió el diff
                 verify_returncode, verify_output = self._run_verify(verify_command, worktree)
                 self._on_event("verificacion_reintentada", str(verify_returncode))
             else:
@@ -301,6 +358,7 @@ class Executor:
             "titulo": plan.title,
             "returncode": code,
             "verify_returncode": verify_returncode,
+            "correspondencia": corresp,
             "terminado": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
 
@@ -318,6 +376,7 @@ class Executor:
             verify_returncode=verify_returncode,
             verify_output=verify_output,
             verify_corrected=verify_corrected,
+            correspondencia=corresp,
         )
 
     def _run_verify(self, command: str, cwd: str) -> tuple[int, str]:

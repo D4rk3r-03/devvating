@@ -22,7 +22,7 @@ type Msg =
   | { tipo: "intervencion_resuelta"; ronda: number; texto: string | null }
   | { tipo: "ejecucion_inicio"; transcript: string; repo: string }
   | { tipo: "ejecucion_evento"; evento: string; valor: string }
-  | { tipo: "ejecucion_fin"; rama: string; rama_base: string; returncode: number; archivos: string[]; diff: string }
+  | { tipo: "ejecucion_fin"; rama: string; rama_base: string; returncode: number; archivos: string[]; diff: string; correspondencia?: Correspondencia }
   | { tipo: "ejecucion_error"; mensaje: string }
   | { tipo: "commit_fin"; sha: string; rama: string }
   | { tipo: "descartar_fin"; base: string; rama: string }
@@ -46,6 +46,10 @@ type Worktree = { path: string; rama: string; existe: boolean; tiene_cambios: bo
 // Un debate leído del disco (transcript). Lo mismo que el evento `fin` ofrece
 // en vivo, pero recuperable en cualquier momento: reiniciar el Hub ya no
 // cuesta perder el plan ni la posibilidad de aplicarlo.
+// Cruce determinista plan↔diff: qué se tocó sin que el plan lo nombrara.
+type Correspondencia = {
+  tocados_no_previstos: string[]; previstos_no_tocados: string[]; sospechoso: boolean;
+};
 type RepoServido = { id: string; ruta: string };
 // Proyecto descubierto bajo una raíz declarada. `cand_id` es lo ÚNICO que el
 // front manda de vuelta: la ruta se muestra, nunca viaja al servidor (D9).
@@ -71,6 +75,7 @@ type Pendiente = {
 type Recuperada = {
   rama: string; rama_base: string; worktree: string;
   returncode: number | null; archivos: string[]; diff: string;
+  correspondencia?: Correspondencia;
 };
 type Archivado = {
   nombre: string; tema: string; sintesis: string; sintetizador: string;
@@ -506,7 +511,7 @@ export default function App() {
     let intervencion: { ronda: number } | null = null;
     let ejecucion:
       | { estado: "corriendo"; detalle: string }
-      | { estado: "fin"; rama: string; rama_base: string; archivos: string[]; diff: string; returncode: number }
+      | { estado: "fin"; rama: string; rama_base: string; archivos: string[]; diff: string; returncode: number; correspondencia?: Correspondencia }
       | { estado: "error"; mensaje: string }
       | null = null;
     let cierre:
@@ -532,7 +537,7 @@ export default function App() {
       else if (m.tipo === "ejecucion_evento")
         ejecucion = { estado: "corriendo", detalle: `${m.evento}: ${m.valor}` };
       else if (m.tipo === "ejecucion_fin")
-        ejecucion = { estado: "fin", rama: m.rama, rama_base: m.rama_base, archivos: m.archivos, diff: m.diff, returncode: m.returncode };
+        ejecucion = { estado: "fin", rama: m.rama, rama_base: m.rama_base, archivos: m.archivos, diff: m.diff, returncode: m.returncode, correspondencia: m.correspondencia };
       else if (m.tipo === "ejecucion_error")
         ejecucion = { estado: "error", mensaje: m.mensaje };
       else if (m.tipo === "commit_fin") cierre = { tipo: "commit", sha: m.sha, rama: m.rama };
@@ -579,6 +584,7 @@ export default function App() {
           // igual que el servidor: -1 cae en la rama !== 0 del panel.
           returncode: recuperada.returncode ?? -1,
           desconocido: recuperada.returncode === null,
+          correspondencia: recuperada.correspondencia,
         }
       : null
   );
@@ -1259,6 +1265,16 @@ export default function App() {
                       {ejecucion.returncode}) · rama <code>{ejecucion.rama}</code></h3>
                   ) : (
                     <h3><GitBranch size={16} /> Cambios en staging · rama <code>{ejecucion.rama}</code></h3>
+                  )}
+                  {/* Señal determinista plan↔diff: no bloquea, avisa dónde
+                      mirar. Va ANTES del diff, para que se lea con esa duda. */}
+                  {"correspondencia" in ejecucion && ejecucion.correspondencia?.sospechoso && (
+                    <p className="aviso-correspondencia">
+                      <TriangleAlert size={14} /> Se tocaron archivos que el plan
+                      no nombra:{" "}
+                      <b>{ejecucion.correspondencia.tocados_no_previstos.join(", ")}</b>.
+                      Puede ser legítimo — revisa el diff con eso en mente.
+                    </p>
                   )}
                   {ejecucion.archivos.length === 0 ? (
                     <p>El ejecutor no produjo cambios.</p>

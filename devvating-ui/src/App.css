@@ -592,3 +592,12 @@ pre.diff .hunk { color: var(--accent); }
 .cand-check { color: var(--success); display: inline-flex; flex-shrink: 0; }
 .cand-nota { color: var(--text-muted); font-size: .68rem; flex-shrink: 0; }
 .lista-candidatos .vacio { color: var(--text-muted); font-style: italic; }
+.aviso-correspondencia {
+  display: flex; align-items: flex-start; gap: .45rem;
+  padding: .55rem .7rem; margin: .5rem 0 .8rem;
+  font-size: .82rem; line-height: 1.4;
+  color: var(--warning); border-radius: 6px;
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+}
+.aviso-correspondencia svg { flex-shrink: 0; margin-top: .15rem; }

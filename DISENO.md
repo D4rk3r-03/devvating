@@ -751,3 +751,39 @@ arriba, así que cada carpeta interna de un repo (`docs/`, `src/`, `tests/`)
 aparecía como proyecto registrable. De ahí `gitutil.es_raiz_de_repo` y que el
 escaneo no descienda dentro de un repositorio ya visto — pero sí bajo una
 carpeta contenedora sin git, que es como cuelgan muchos proyectos.
+
+### D16 — Auditoría de la ejecución: guarda determinista primero (2026-07-22)
+
+El vocero preguntó si se comprueba que lo ejecutado corresponde al plan. No se
+comprobaba: la fase 5 (`--verificar`) corre los tests del proyecto, que miden
+su SALUD, no la correspondencia. Un agente puede aplicar algo distinto al plan
+y los tests pasar igual — ocurrió: un plan de cuatro ediciones sobre
+documentación terminó tocando un único `.log` sin relación, y se descubrió
+revisando el diff a mano.
+
+Debatido EN DEVVATING (transcript `20260722-165849-*`, cortado por cuota
+agotada pero **convergido de hecho**: antigravity votó "sí" y aceptó las tres
+correcciones de claude diciendo "no tengo más objeciones"). Diseño acordado:
+
+1. **Guarda determinista ANTES del modelo** — `executor.correspondencia()`
+   cruza las rutas que el plan nombra con `changed_files`, que ya se calculaba.
+   Coste cero, sin alucinación posible. **Implementada.** Verificada contra los
+   dos casos reales: marca la ejecución mala y NO marca la buena.
+2. **Auditor: tercero limpio** — ni el ejecutor (se autoevaluaría) ni un
+   debatiente (llega con postura). Mismo `HeadlessBackend`, `--allowedTools
+   Read,Glob,Grep`. *Pendiente.*
+3. **Anti-complacencia** — invertir la carga de la prueba (pedirle listar solo
+   lo no solicitado y lo omitido, no "validar") **más** exigirle cita textual
+   verificable contra el diff, al estilo de `_cita_localizada`: invertir la
+   carga sin verificar solo cambia la dirección del sesgo. *Pendiente.*
+4. **Efecto: bloqueo blando con escape explícito**, como el gate de decisiones
+   (409 + `forzar`). *Pendiente.*
+5. **Fallback = NO bloquear.** Un JSON roto del auditor es un fallo SUYO, no
+   evidencia contra el diff; bloquear ahí castiga trabajo bueno por un error de
+   formato de un tercero. Coherente con `_parse_verdict` → `None` y
+   `_parse_decisiones` → `[]`.
+
+La guarda determinista es una SEÑAL, no un veredicto: un plan puede nombrar
+archivos que solo cita, y una ejecución legítima puede tocar algo que el plan
+no nombró. Se muestra junto al diff, que es donde el vocero decide, y viaja en
+el sidecar para sobrevivir a un reinicio.

@@ -271,6 +271,9 @@ def _ejecucion_worker(
         "returncode": resultado.returncode,
         "archivos": resultado.changed_files,
         "diff": resultado.diff,
+        # Señal determinista plan↔diff: llega junto al diff, que es donde el
+        # vocero decide. No bloquea nada todavía (el auditor viene después).
+        "correspondencia": resultado.correspondencia,
     })
     emitir({"tipo": "ejecucion_cerrada"})
 
@@ -953,6 +956,8 @@ def crear_app(
             "returncode": ue.get("returncode"),
             "archivos": gitutil.staged_changed_files(wt),
             "diff": gitutil.staged_diff(wt),
+            # Del sidecar: se calculó al ejecutar y sobrevive al reinicio.
+            "correspondencia": (gitutil.leer_sidecar(wt) or {}).get("correspondencia", {}),
         }}
 
     @app.post("/api/commit", dependencies=[_csrf])
