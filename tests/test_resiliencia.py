@@ -46,6 +46,26 @@ class TestClasificacion:
                         "429 rate limit", "Overloaded"):
             assert isinstance(clasificar_fallo(detalle, "x"), TransientProviderError)
 
+    def test_cuota_agotada_no_es_transitoria_aunque_venga_con_429(self):
+        # Verificado en real: el CLI de Claude manda el límite de gasto mensual
+        # con [429], así que se reintentaba 3 veces (65 s) algo que no se cura
+        # con backoff. La cuota se mira ANTES que el 429.
+        casos = [
+            "You've hit your monthly spend limit · raise it at claude.ai [429]",
+            "usage limit reached [429]",
+            "quota exceeded",
+            "insufficient credit balance",
+        ]
+        for detalle in casos:
+            exc = clasificar_fallo(detalle, "x")
+            assert isinstance(exc, SessionLimitError), detalle
+            assert not isinstance(exc, TransientProviderError), detalle
+
+    def test_un_429_normal_sigue_siendo_transitorio(self):
+        # No romper el caso legítimo: un rate limit momentáneo sí se reintenta.
+        assert isinstance(clasificar_fallo("429 rate limit", "x"),
+                          TransientProviderError)
+
     def test_desconocido_es_generico_no_reintentable(self):
         exc = clasificar_fallo("algo raro pasó", "x")
         assert isinstance(exc, CliAdapterError)

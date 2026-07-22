@@ -42,7 +42,15 @@ class CliAdapterError(AgentError):
 _TRANSITORIO_RE = re.compile(
     r"(?i)\b(503|429|529|resource_exhausted|unavailable|overloaded|high demand|rate limit)\b"
 )
-_LIMITE_SESION_RE = re.compile(r"(?i)session limit")
+# Cuotas agotadas por ventana o por plan. Van ANTES del test de transitorios
+# porque el proveedor las manda con un 429, y un 429 aquí no se cura con
+# backoff: verificado en real con "monthly spend limit", que reintentamos tres
+# veces (65 s de espera) antes de rendirnos. Reintentar una cuota agotada solo
+# retrasa el aviso al vocero — y con facturación por uso, podría costar.
+_LIMITE_SESION_RE = re.compile(
+    r"(?i)(session limit|spend limit|usage limit|monthly limit|quota exceeded"
+    r"|out of credit|insufficient credit)"
+)
 _RESETS_RE = re.compile(r"(?i)resets\s+([^\n·]+)")
 
 # Tope corto para cerrar un stream: tras el EOF de stdout, cuánto esperar a que
