@@ -21,6 +21,16 @@ def is_git_repo(repo: str) -> bool:
     return r.returncode == 0 and r.stdout.strip() == "true"
 
 
+def tiene_commits(repo: str) -> bool:
+    """True si el repo tiene al menos un commit (HEAD resoluble).
+
+    Un `git init` recién hecho es un repo válido pero sin HEAD, y un worktree
+    se ramifica DESDE HEAD: sin él nace vacío, sin ninguno de los archivos del
+    proyecto. El agente trabajaría sobre la nada sin que nada fallara.
+    """
+    return _run(["rev-parse", "--verify", "HEAD"], repo).returncode == 0
+
+
 def current_branch(repo: str) -> str:
     return _run(["rev-parse", "--abbrev-ref", "HEAD"], repo).stdout.strip()
 

@@ -209,6 +209,19 @@ class Executor:
             raise ExecutorError(
                 f"'{self.repo}' no es un repositorio git. Inicialízalo con `git init`."
             )
+        # `git init` a secas no basta: el worktree se ramifica desde HEAD y sin
+        # commits nace VACÍO. El agente entraba a un directorio sin un solo
+        # archivo del proyecto y "aplicaba" el plan sobre la nada — sin error,
+        # porque git crea el worktree igual. Verificado en real.
+        if not gitutil.tiene_commits(self.repo):
+            raise ExecutorError(
+                f"El repositorio '{self.repo}' no tiene ningún commit todavía. "
+                "El plan se aplica en un worktree ramificado desde HEAD, que sin "
+                "commits nace vacío: el agente no vería tus archivos. Haz el "
+                "commit inicial y reintenta:\n"
+                f"    git -C {self.repo} add -A && "
+                f"git -C {self.repo} commit -m \"Estado inicial\""
+            )
         # Gate de decisiones (una sola verdad; el Hub la traduce a 422): no
         # ejecutar un plan con una decisión crucial abierta. Va antes de crear
         # el worktree, así no deja ninguno colgado.

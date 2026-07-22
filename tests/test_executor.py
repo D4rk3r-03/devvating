@@ -243,3 +243,51 @@ class TestClaudeCodeBackendArgv:
             "plan", str(tmp_path), allow_commands=False
         )
         assert code == 0 and "stdin-nulo" in output
+
+
+class TestRepoSinCommits:
+    """`git init` a secas no basta: el worktree se ramifica desde HEAD y sin
+    commits nace VACÍO. El agente aplicaba el plan sobre un directorio sin un
+    solo archivo del proyecto, y nada fallaba — git crea el worktree igual."""
+
+    @pytest.fixture
+    def repo_vacio(self, tmp_path):
+        import subprocess
+
+        repo = tmp_path / "recien-iniciado"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+        (repo / "documento.md").write_text("contenido real\n", encoding="utf-8")
+        return repo
+
+    def test_tiene_commits_distingue_init_de_repo_usable(self, repo_vacio, git_repo):
+        assert gitutil.tiene_commits(str(repo_vacio)) is False
+        assert gitutil.tiene_commits(str(git_repo)) is True
+
+    def test_ejecutar_falla_con_instrucciones_en_vez_de_worktree_vacio(self, repo_vacio):
+        ex = Executor(str(repo_vacio), WriterBackend())
+        with pytest.raises(ExecutorError) as info:
+            ex.execute(PLAN)
+        mensaje = str(info.value)
+        assert "no tiene ningún commit" in mensaje
+        # Accionable, no solo un diagnóstico: lleva el comando a copiar.
+        assert "add -A" in mensaje and 'commit -m "Estado inicial"' in mensaje
+
+    def test_no_deja_worktree_colgando_al_rechazar(self, repo_vacio):
+        ex = Executor(str(repo_vacio), WriterBackend())
+        with pytest.raises(ExecutorError):
+            ex.execute(PLAN)
+        # El gate va ANTES de crear nada: ni worktrees ni ramas huérfanas.
+        assert gitutil.list_worktrees(str(repo_vacio)) == []
+
+    def test_tras_el_commit_inicial_ejecuta_normal(self, repo_vacio):
+        import subprocess
+
+        subprocess.run(["git", "add", "-A"], cwd=repo_vacio, check=True)
+        subprocess.run(["git", "commit", "-qm", "inicial"], cwd=repo_vacio, check=True)
+        out = Executor(str(repo_vacio), WriterBackend()).execute(PLAN)
+        # El worktree ya NO nace vacío: trae los archivos del proyecto.
+        assert (Path(out.worktree) / "documento.md").is_file()
+        assert out.changed_files
