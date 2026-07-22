@@ -48,6 +48,27 @@ class TestExecutor:
         out = ex.execute(PLAN)
         assert out.branch.startswith("devvating/demo-plan-")
 
+    def test_worktree_respeta_el_directorio_base_configurado(self, git_repo, tmp_path):
+        # DEVVATING_WORKTREE_DIR redirige la base. Es lo que impide que la
+        # suite siembre el /tmp del sistema (fixture autouse worktrees_aislados)
+        # y permite al vocero moverla si su temp es pequeño o volátil.
+        base = tmp_path / "worktrees"  # el mismo que fija el fixture autouse
+        out = Executor(str(git_repo), WriterBackend()).execute(PLAN)
+        assert Path(out.worktree).parent == base
+        assert (Path(out.worktree) / "hola.txt").is_file()  # el plan se aplicó ahí
+
+    def test_la_suite_no_escribe_en_el_temp_del_sistema(self, git_repo):
+        # Regresión de la fuga: 65 worktrees de tests quedaron acumulados en
+        # /tmp/devvating-worktrees porque los tests no cierran el ciclo
+        # commit/descartar, que es quien los limpia en producción.
+        import tempfile
+
+        del_sistema = Path(tempfile.gettempdir()) / "devvating-worktrees"
+        antes = set(del_sistema.iterdir()) if del_sistema.is_dir() else set()
+        Executor(str(git_repo), WriterBackend()).execute(PLAN)
+        despues = set(del_sistema.iterdir()) if del_sistema.is_dir() else set()
+        assert antes == despues
+
     def test_rechaza_directorio_que_no_es_repo(self, tmp_path):
         ex = Executor(str(tmp_path), WriterBackend())
         with pytest.raises(ExecutorError, match="no es un repositorio"):

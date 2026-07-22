@@ -48,6 +48,20 @@ class StubAdapter:
         return respuesta
 
 
+@pytest.fixture(autouse=True)
+def worktrees_aislados(tmp_path, monkeypatch):
+    """Confina los worktrees de la ejecución al tmp_path del test.
+
+    Sin esto, `Executor` los crea bajo el temp del SISTEMA y solo se limpian
+    si el test cierra el ciclo (commit o descartar) — que casi ninguno hace,
+    porque prueban otra cosa. El resultado era basura acumulada en
+    /tmp/devvating-worktrees (65 directorios encontrados en una auditoría).
+    Es autouse a propósito: un test futuro que ejecute un plan queda cubierto
+    sin acordarse de nada, y pytest borra el tmp_path por él.
+    """
+    monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "worktrees"))
+
+
 @pytest.fixture
 def git_repo(tmp_path):
     """Repo git real, limpio y con un commit inicial."""
