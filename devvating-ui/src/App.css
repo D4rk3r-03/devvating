@@ -110,6 +110,22 @@
 .rama-borrar:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .lista-ramas .vacio { color: var(--text-muted); font-style: italic; }
 
+/* Worktrees colgando: los que tienen trabajo sin commitear se marcan, porque
+   son los únicos donde limpiar destruye algo (la rama siempre sobrevive). */
+.wt-marca { display: inline-flex; color: var(--warning); flex-shrink: 0; }
+.wt-acciones { display: flex; gap: .4rem; margin-top: .5rem; }
+.wt-limpiar {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .3rem .6rem; font-size: .72rem; cursor: pointer;
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border-color); border-radius: 6px;
+}
+.wt-limpiar:hover { color: var(--text-main); border-color: var(--text-muted); }
+.wt-limpiar.peligro:hover {
+  color: var(--danger); border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
 /* ---------------------------------------------------------------- main */
 .barra-estado {
   display: flex; align-items: center; gap: .6rem;

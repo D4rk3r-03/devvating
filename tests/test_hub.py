@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -849,3 +850,85 @@ class TestCierrePlan:
             r = c.post("/api/cerrar-plan",
                        json={"transcript": nombre, "agentes": ["claude-cli", "gemini-cli"]})
             assert r.status_code == 422
+
+
+class TestWorktreesEnElHub:
+    """Recolección de worktrees de ejecución desde el navegador. Mismo criterio
+    que `devvating limpiar`: lo sin commitear no se toca sin --forzar."""
+
+    @pytest.fixture
+    def hub_git(self, git_repo, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wtbase"))
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            yield c, app, git_repo
+
+    def _worktree(self, git_repo, rama, sucio=False):
+        from devvating import gitutil
+
+        path = str(git_repo.parent / "wt" / rama.replace("/", "-"))
+        gitutil.add_worktree(str(git_repo), rama, path)
+        if sucio:
+            (Path(path) / "pendiente.txt").write_text("x\n", encoding="utf-8")
+        return path
+
+    def test_lista_worktrees_con_su_estado(self, hub_git):
+        c, _, git_repo = hub_git
+        self._worktree(git_repo, "devvating/limpio")
+        self._worktree(git_repo, "devvating/sucio", sucio=True)
+        datos = c.get("/api/worktrees").json()
+        por_rama = {w["rama"]: w for w in datos["worktrees"]}
+        assert por_rama["devvating/limpio"]["tiene_cambios"] is False
+        assert por_rama["devvating/sucio"]["tiene_cambios"] is True
+
+    def test_limpiar_retira_los_limpios_y_conserva_los_sucios(self, hub_git):
+        c, _, git_repo = hub_git
+        limpio = self._worktree(git_repo, "devvating/limpio")
+        sucio = self._worktree(git_repo, "devvating/sucio", sucio=True)
+        r = c.post("/api/worktrees/limpiar", json={}).json()
+        assert r["retirados"] == 1
+        assert not Path(limpio).exists()
+        assert Path(sucio).exists()  # trabajo sin revisar: intacto
+        assert "devvating/sucio" in r["conservados"]
+
+    def test_forzar_retira_tambien_los_sucios(self, hub_git):
+        c, _, git_repo = hub_git
+        sucio = self._worktree(git_repo, "devvating/sucio", sucio=True)
+        r = c.post("/api/worktrees/limpiar", json={"forzar": True}).json()
+        assert r["retirados"] == 1 and not Path(sucio).exists()
+
+    def test_nunca_retira_la_ejecucion_pendiente_de_decision(self, hub_git):
+        # El worktree que el vocero está mirando (botones commit/descartar
+        # activos) no se toca NI con forzar: retirarlo dejaría esos botones
+        # apuntando a un directorio borrado.
+        c, app, git_repo = hub_git
+        pendiente = self._worktree(git_repo, "devvating/pendiente", sucio=True)
+        app.state.ultima_ejecucion = {
+            "rama": "devvating/pendiente", "base": "main",
+            "repo": str(git_repo), "worktree": pendiente, "returncode": 0,
+        }
+        r = c.post("/api/worktrees/limpiar", json={"forzar": True}).json()
+        assert r["retirados"] == 0
+        assert Path(pendiente).exists()
+
+    def test_limpia_huerfanos_de_repos_desaparecidos(self, hub_git, tmp_path):
+        c, _, _ = hub_git
+        base = tmp_path / "wtbase"
+        huerfano = base / "devvating-viejo-aaa111"
+        huerfano.mkdir(parents=True)
+        (huerfano / ".git").write_text("gitdir: /tmp/no-existe/.git\n", encoding="utf-8")
+        assert c.get("/api/worktrees").json()["huerfanos"] == ["devvating-viejo-aaa111"]
+        assert c.post("/api/worktrees/limpiar", json={}).json()["huerfanos"] == 1
+        assert not huerfano.exists()
+
+    def test_limpiar_exige_csrf(self, hub_git):
+        c, _, _ = hub_git
+        r = c.post("/api/worktrees/limpiar", json={},
+                   headers={"X-Devvating-CSRF": "falso"})
+        assert r.status_code == 403
+
+    def test_repo_sin_git_no_rompe_el_listado(self, tmp_path):
+        app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            assert c.get("/api/worktrees").json() == {"worktrees": [], "huerfanos": []}

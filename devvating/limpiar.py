@@ -21,19 +21,12 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import tempfile
 import time
 
 from rich.console import Console
 
 from . import gitutil
-
-
-def _base_worktrees() -> str:
-    """Misma base que usa Executor._worktree_path (incluida la override)."""
-    return os.environ.get("DEVVATING_WORKTREE_DIR") or os.path.join(
-        tempfile.gettempdir(), "devvating-worktrees"
-    )
+from .executor import base_worktrees
 
 
 def _dias_desde(path: str) -> float:
@@ -142,7 +135,7 @@ def _limpiar_huerfanos(console: Console, confirmar: bool) -> int:
     `git worktree list` ni los poda `git worktree prune`. Sin esto quedan para
     siempre — es como se acumularon 65 en una auditoría.
     """
-    base = _base_worktrees()
+    base = base_worktrees()
     huerfanos = gitutil.worktrees_huerfanos(base)
     if not huerfanos:
         return 0

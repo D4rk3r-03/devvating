@@ -83,6 +83,19 @@ class ExecutionOutcome:
 EventCb = Callable[[str, str], None]
 
 
+def base_worktrees() -> str:
+    """Directorio raíz de los worktrees de ejecución.
+
+    Único lugar que resuelve esta ruta: la usan el Executor para crearlos y
+    `limpiar`/Hub para recogerlos, y si divergen la limpieza mira donde no es.
+    `DEVVATING_WORKTREE_DIR` la redirige (la suite la apunta a un tmp_path por
+    test; en real sirve para sacarlos de un /tmp pequeño o volátil).
+    """
+    return os.environ.get("DEVVATING_WORKTREE_DIR") or os.path.join(
+        tempfile.gettempdir(), "devvating-worktrees"
+    )
+
+
 def _exec_prompt(plan: ExecutionPlan) -> str:
     return (
         "Aplica el siguiente plan aprobado en este repositorio. Realiza ÚNICAMENTE "
@@ -176,13 +189,7 @@ class Executor:
         # En el temp del sistema, NO bajo .git/: un worktree dentro de .git
         # confunde a `claude -p` (trata .git como interno y no escribe ahí,
         # verificado en real). El dir final lo crea `git worktree add`.
-        # DEVVATING_WORKTREE_DIR redirige la base: la suite lo apunta a un
-        # tmp_path por test (fixture autouse en conftest) para no sembrar el
-        # /tmp del sistema con worktrees que nadie recoge — los tests rara vez
-        # cierran el ciclo commit/descartar, que es quien los limpia en real.
-        base = os.environ.get("DEVVATING_WORKTREE_DIR") or os.path.join(
-            tempfile.gettempdir(), "devvating-worktrees"
-        )
+        base = base_worktrees()
         os.makedirs(base, exist_ok=True)
         slug = branch.replace("/", "-")
         # Sufijo único (no timestamp): dos ejecuciones en el mismo segundo

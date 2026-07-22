@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import {
   Ban, Check, FileText, GitBranch, Hand, ListChecks, Play, RefreshCw, RotateCcw,
-  Scale, Send, Swords, Trash2, TriangleAlert,
+  Scale, Send, Swords, Trash2, TriangleAlert, Boxes,
 } from "lucide-react";
 import "./App.css";
 
@@ -40,6 +40,9 @@ type Decision = {
 };
 
 type Rama = { nombre: string; sha: string; fecha: string; asunto: string; actual: boolean };
+// Worktree de ejecución que quedó colgando. `tiene_cambios` = trabajo sin
+// commitear que se perdería al retirarlo (la rama y sus commits, nunca).
+type Worktree = { path: string; rama: string; existe: boolean; tiene_cambios: boolean };
 
 // ------------------------------------------------------------- helpers
 const escapeHtml = (s: string) =>
@@ -202,6 +205,8 @@ export default function App() {
   const [corriendo, setCorriendo] = useState(false);
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [ramas, setRamas] = useState<Rama[]>([]);
+  const [worktrees, setWorktrees] = useState<Worktree[]>([]);
+  const [huerfanos, setHuerfanos] = useState<string[]>([]);
   const [aviso, setAviso] = useState("");
 
   const [tema, setTema] = useState("");
@@ -251,6 +256,32 @@ export default function App() {
     cargarRamas();
   };
 
+  const cargarWorktrees = () =>
+    fetch("/api/worktrees").then((r) => r.json()).then((d) => {
+      setWorktrees(d.worktrees ?? []); setHuerfanos(d.huerfanos ?? []);
+    });
+
+  // `forzar` incluye los que tienen cambios sin commitear: eso SÍ se pierde,
+  // así que va detrás de una confirmación aparte y explícita.
+  const limpiarWorktrees = async (forzar: boolean) => {
+    const conTrabajo = worktrees.filter((w) => w.tiene_cambios).length;
+    if (forzar && !window.confirm(
+      `Se descartarán los cambios sin commitear de ${conTrabajo} worktree(s). ` +
+      "Las ramas y sus commits se conservan. ¿Continuar?"
+    )) return;
+    const r = await post("/api/worktrees/limpiar", { forzar });
+    if (!r.ok) {
+      setAviso((await r.json()).detail ?? "No se pudo limpiar.");
+      return;
+    }
+    const d = await r.json();
+    const partes = [];
+    if (d.retirados) partes.push(`${d.retirados} worktree(s) retirados`);
+    if (d.huerfanos) partes.push(`${d.huerfanos} huérfano(s) borrados`);
+    setAviso(partes.length ? partes.join(" · ") : "No había nada que limpiar.");
+    cargarWorktrees();
+  };
+
   useEffect(() => {
     fetch("/api/roster").then((r) => r.json()).then((d) => {
       setRoster(d.agentes); setAlias(d.alias); setSesgosDisp(d.sesgos ?? []);
@@ -258,6 +289,7 @@ export default function App() {
     });
     cargarTranscripts();
     cargarRamas();
+    cargarWorktrees();
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.onmessage = (ev) => {
@@ -360,8 +392,10 @@ export default function App() {
   }, [ejecucion, config, commitMsg]);
 
   // El historial de ramas cambia al ejecutar (aparece una) o al commitear/
-  // descartar (cambia su estado o se borra): refrescarlo entonces.
-  useEffect(() => { cargarRamas(); }, [cierre, ejecucion?.estado]);
+  // descartar (cambia su estado o se borra): refrescarlo entonces. Los
+  // worktrees siguen el mismo ciclo — cada ejecución crea uno, y commitear o
+  // descartar lo retira.
+  useEffect(() => { cargarRamas(); cargarWorktrees(); }, [cierre, ejecucion?.estado]);
 
   useEffect(() => {
     finRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -544,6 +578,51 @@ export default function App() {
               {ramas.length === 0 && <li className="vacio">ninguna</li>}
             </ul>
           </section>
+
+          {(worktrees.length > 0 || huerfanos.length > 0) && (
+            <section className="sidebar-seccion">
+              <h2 className="titulo-lista"><Boxes size={14} /> Worktrees colgando</h2>
+              <ul className="lista-ramas">
+                {worktrees.map((w) => (
+                  <li key={w.path}>
+                    <div className="rama-info">
+                      <span className="rama-nombre" title={w.path}>
+                        {w.rama.replace(/^devvating\//, "")}
+                      </span>
+                      <span className="rama-asunto">
+                        {w.tiene_cambios ? "cambios sin commitear" : "sin cambios"}
+                      </span>
+                    </div>
+                    {w.tiene_cambios && (
+                      <span className="wt-marca" title="Tiene trabajo sin commitear: no se retira sin forzar.">
+                        <TriangleAlert size={13} />
+                      </span>
+                    )}
+                  </li>
+                ))}
+                {huerfanos.map((h) => (
+                  <li key={h}>
+                    <div className="rama-info">
+                      <span className="rama-nombre" title={h}>{h}</span>
+                      <span className="rama-asunto">huérfano · su repo ya no existe</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <div className="wt-acciones">
+                <button className="wt-limpiar" onClick={() => limpiarWorktrees(false)}
+                  title="Retira los que no tienen cambios sin commitear, y los huérfanos.">
+                  <Trash2 size={13} /> Limpiar
+                </button>
+                {worktrees.some((w) => w.tiene_cambios) && (
+                  <button className="wt-limpiar peligro" onClick={() => limpiarWorktrees(true)}
+                    title="Retira TAMBIÉN los que tienen cambios sin commitear: esos cambios se pierden (las ramas no).">
+                    <TriangleAlert size={13} /> Forzar
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
         </div>
       </aside>
 

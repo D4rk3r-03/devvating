@@ -22,6 +22,7 @@ import json
 import queue
 import re
 import secrets
+import shutil
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -45,6 +46,7 @@ from .executor import (
     ExecutionPlan,
     Executor,
     ExecutorError,
+    base_worktrees,
     decisiones_crucial_sin_resolver,
 )
 from .orchestrator import (
@@ -625,6 +627,58 @@ def crear_app(
         for r in lista:
             r["actual"] = r["nombre"] == actual
         return {"ramas": lista, "actual": actual}
+
+    @app.get("/api/worktrees")
+    def worktrees() -> dict:
+        """Worktrees de ejecución que quedaron colgando, con lo que decide.
+
+        `tiene_cambios` marca los que perderían trabajo si se retiran (la rama
+        y sus commits sobreviven siempre; lo sin commitear, no). Los huérfanos
+        van aparte: su repo padre ya no existe, así que ningún repo los ve.
+        """
+        if not gitutil.is_git_repo(repo):
+            return {"worktrees": [], "huerfanos": []}
+        gitutil.prune_worktrees(repo)
+        return {
+            "worktrees": gitutil.list_worktrees(repo),
+            "huerfanos": [
+                Path(h).name for h in gitutil.worktrees_huerfanos(base_worktrees())
+            ],
+        }
+
+    @app.post("/api/worktrees/limpiar", dependencies=[_csrf])
+    def limpiar_worktrees(cuerpo: dict) -> dict:
+        """Retira los worktrees colgados. Mismo criterio que `devvating limpiar`.
+
+        Sin `forzar`, los que tienen cambios sin commitear se conservan: es
+        trabajo que el vocero aún no revisó y quitarlos lo perdería.
+        """
+        if not gitutil.is_git_repo(repo):
+            raise HTTPException(422, f"'{repo}' no es un repositorio git.")
+        forzar = bool(cuerpo.get("forzar"))
+        gitutil.prune_worktrees(repo)
+        candidatos = [
+            w for w in gitutil.list_worktrees(repo)
+            if not w["tiene_cambios"] or forzar
+        ]
+        # La ejecución pendiente de decisión NO se toca ni con forzar: sus
+        # cambios son justo los que el vocero está mirando, y retirarla dejaría
+        # los botones de commit/descartar apuntando a un directorio borrado.
+        pendiente = (app.state.ultima_ejecucion or {}).get("worktree", "")
+        retirados = [w for w in candidatos if w["path"] != pendiente]
+        for w in retirados:
+            gitutil.remove_worktree(repo, w["path"])
+        huerfanos = gitutil.worktrees_huerfanos(base_worktrees())
+        for h in huerfanos:
+            shutil.rmtree(h, ignore_errors=True)
+        return {
+            "ok": True,
+            "retirados": len(retirados),
+            "huerfanos": len(huerfanos),
+            "conservados": [
+                w["rama"] for w in gitutil.list_worktrees(repo)
+            ],
+        }
 
     @app.post("/api/ramas/borrar", dependencies=[_csrf])
     def borrar_rama(cuerpo: dict) -> dict:
