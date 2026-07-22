@@ -588,3 +588,43 @@ Detalles menores a afinar durante la implementación:
   lector incremental), evento opcional `on_delta` en el contrato sin tocar
   `orchestrator._parse_verdict`, y degradación explícita "sin soporte de
   streaming" para los adaptadores que no emiten deltas.
+
+### D11 — Estado de la ejecución que sobrevive al reinicio (2026-07-22)
+
+Debatido EN DEVVATING (transcript `20260722-093004-*`, convergieron en la
+ronda 2 — primer debate con Antigravity leyendo de verdad el repositorio) y
+arbitrado por el vocero. Motivo: reiniciar el Hub costaba perder la ejecución
+que esperaba decisión. El worktree y la rama seguían en disco, pero
+`app.state.ultima_ejecucion` vivía solo en memoria, así que ya no se ofrecía
+commitear ni descartar el trabajo que estaba a la espera.
+
+Principio que ordena la solución: **no se persiste estado en paralelo a git**.
+Un worktree bajo `devvating/` con cambios sin commitear ES la ejecución
+pendiente, y `gitutil.list_worktrees` ya lo reporta. Solo se guarda aparte lo
+que git no puede saber — sobre todo el `returncode` del backend, que es quien
+decide si el Hub deja commitear (no se presenta como bueno un plan roto).
+
+- **Dónde vive (decisión D1 del vocero)**: en el directorio ADMINISTRATIVO del
+  worktree (`<repo>/.git/worktrees/<n>/devvating-ejecucion.json`), no dentro de
+  su árbol. Dentro, `executor.stage_all` (`add -A`) lo metería en el staging,
+  en el diff que revisa el vocero y en el commit. Verificado en real: en el dir
+  administrativo `git add -A` no lo ve **y** `git worktree remove` se lo lleva
+  igual, así que conserva la virtud que defendía la opción in-tree.
+- **Quién lo escribe (decisión D2)**: el `Executor`, no el consumidor de la
+  cola del Hub. Escribe un marcador `en_curso` antes de lanzar el backend y el
+  sidecar completo al terminar; si el proceso muere a mitad, la ausencia de
+  `returncode` significa inequívocamente "no terminó".
+- **Degradado conservador**: sin sidecar o sin `returncode`, la ejecución se
+  recupera igual (el diff se lee de git) pero NO se ofrece commitear — solo
+  descartar. `commit_cambios` ya comparaba `!= 0`, así que `None` bloquea sin
+  código extra.
+- **Varias pendientes**: se rehidrata la más reciente por marca de tiempo del
+  sidecar; el resto siguen visibles en `/api/worktrees`. Hueco que ninguno de
+  los dos agentes trató y que detectó el sintetizador.
+- `GET /api/ejecucion-pendiente` la expone al front con su diff leído al vuelo,
+  para que la recuperación sea visible y no solo commiteable.
+
+Pendientes de las fases B y C del mismo plan: multi-repo por `repo_id` contra
+lista blanca (roster autónomo por CLI, decisión D3 del vocero) e índice global
+de ejecuciones en `~/.devvating/` como punteros reconstruibles, nunca como
+reemplazo de los transcripts junto a su repo.

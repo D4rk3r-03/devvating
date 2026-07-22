@@ -46,6 +46,10 @@ type Worktree = { path: string; rama: string; existe: boolean; tiene_cambios: bo
 // Un debate leído del disco (transcript). Lo mismo que el evento `fin` ofrece
 // en vivo, pero recuperable en cualquier momento: reiniciar el Hub ya no
 // cuesta perder el plan ni la posibilidad de aplicarlo.
+type Recuperada = {
+  rama: string; rama_base: string; worktree: string;
+  returncode: number | null; archivos: string[]; diff: string;
+};
 type Archivado = {
   nombre: string; tema: string; sintesis: string; sintetizador: string;
   convergio: boolean; decisiones: Decision[]; estado: string; parcial: boolean;
@@ -220,6 +224,10 @@ export default function App() {
   // recupera desde el transcript en disco, que es la fuente duradera.
   const [archivado, setArchivado] = useState<Archivado | null>(null);
   const [pendientesArchivado, setPendientesArchivado] = useState<string[]>([]);
+  // Ejecución que esperaba tu decisión cuando el Hub se reinició. El servidor
+  // la reconstruye de git + sidecar al arrancar; aquí se pide para que sea
+  // VISIBLE, no solo commiteable. `returncode: null` = no se sabe cómo terminó.
+  const [recuperada, setRecuperada] = useState<Recuperada | null>(null);
 
   const [tema, setTema] = useState("");
   const [files, setFiles] = useState("");
@@ -297,6 +305,10 @@ export default function App() {
       setWorktrees(d.worktrees ?? []); setHuerfanos(d.huerfanos ?? []);
     });
 
+  const cargarRecuperada = () =>
+    fetch("/api/ejecucion-pendiente").then((r) => r.json())
+      .then((d) => setRecuperada(d.pendiente ?? null));
+
   // `forzar` incluye los que tienen cambios sin commitear: eso SÍ se pierde,
   // así que va detrás de una confirmación aparte y explícita.
   const limpiarWorktrees = async (forzar: boolean) => {
@@ -326,6 +338,7 @@ export default function App() {
     cargarTranscripts();
     cargarRamas();
     cargarWorktrees();
+    cargarRecuperada();
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.onmessage = (ev) => {
@@ -344,7 +357,7 @@ export default function App() {
   }, []);
 
   // Reducción de mensajes → items del feed + turno pendiente + paneles.
-  const { items, pendiente, capacidades, config, fin, error, cancelado, intervencion, ejecucion, cierre } = useMemo(() => {
+  const { items, pendiente, capacidades, config, fin, error, cancelado, intervencion, ejecucion: ejecucionEnVivo, cierre } = useMemo(() => {
     const items: Item[] = [];
     let pendiente: { agente: string; fase: string; parcial: string } | null = null;
     let capacidades: Record<string, boolean> = {};
@@ -413,6 +426,25 @@ export default function App() {
     return { items, pendiente, capacidades, config, fin, error, cancelado, intervencion, ejecucion, cierre };
   }, [msgs]);
 
+  // La ejecución en vivo manda; si no hay (Hub recién arrancado), se muestra la
+  // recuperada del disco con el mismo panel. `recuperada` ya no aplica en
+  // cuanto el vocero cierra el ciclo (cierre), que es quien retira el worktree.
+  const ejecucion = ejecucionEnVivo ?? (
+    recuperada && !cierre
+      ? {
+          estado: "fin" as const,
+          rama: recuperada.rama,
+          rama_base: recuperada.rama_base,
+          archivos: recuperada.archivos,
+          diff: recuperada.diff,
+          // null (no se sabe cómo terminó) se trata como "no commiteable",
+          // igual que el servidor: -1 cae en la rama !== 0 del panel.
+          returncode: recuperada.returncode ?? -1,
+          desconocido: recuperada.returncode === null,
+        }
+      : null
+  );
+
   // Al llegar la síntesis, las decisiones cruciales sin resolver gatean la
   // ejecución (el PanelDecisiones actualiza esto al guardar).
   useEffect(() => {
@@ -431,7 +463,9 @@ export default function App() {
   // descartar (cambia su estado o se borra): refrescarlo entonces. Los
   // worktrees siguen el mismo ciclo — cada ejecución crea uno, y commitear o
   // descartar lo retira.
-  useEffect(() => { cargarRamas(); cargarWorktrees(); }, [cierre, ejecucion?.estado]);
+  useEffect(() => {
+    cargarRamas(); cargarWorktrees(); cargarRecuperada();
+  }, [cierre, ejecucionEnVivo?.estado]);
 
   useEffect(() => {
     finRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -903,7 +937,10 @@ export default function App() {
               )}
               {ejecucion.estado === "fin" && (
                 <>
-                  {ejecucion.returncode !== 0 ? (
+                  {"desconocido" in ejecucion && ejecucion.desconocido ? (
+                    <h3><TriangleAlert size={16} /> Ejecución recuperada, sin saber cómo
+                      terminó · rama <code>{ejecucion.rama}</code></h3>
+                  ) : ejecucion.returncode !== 0 ? (
                     <h3><TriangleAlert size={16} /> El plan no se aplicó limpio (código{" "}
                       {ejecucion.returncode}) · rama <code>{ejecucion.rama}</code></h3>
                   ) : (
@@ -935,10 +972,20 @@ export default function App() {
                   ) : ejecucion.returncode !== 0 ? (
                     <div className="acciones-cierre">
                       <p className="pista-cierre fallo">
-                        El backend terminó con error: el plan quedó a medias. Revisa el diff
-                        de arriba, pero <b>no se ofrece commit</b> — commitear un fallo
-                        presentaría éxito sobre un plan roto. Descarta para volver a{" "}
-                        <code>{ejecucion.rama_base}</code>.
+                        {"desconocido" in ejecucion && ejecucion.desconocido ? (
+                          <>Estos cambios estaban esperando tu decisión, pero no consta
+                            cómo terminó la ejecución (el Hub se reinició antes de que
+                            acabara, o la aplicó una versión anterior). Revisa el diff:
+                            si te sirve, commitéalo tú desde{" "}
+                            <code>{ejecucion.rama}</code>; si no, descártalo. <b>No se
+                            ofrece commit desde aquí</b> porque presentaría como bueno
+                            algo que nadie verificó.</>
+                        ) : (
+                          <>El backend terminó con error: el plan quedó a medias. Revisa
+                            el diff de arriba, pero <b>no se ofrece commit</b> — commitear
+                            un fallo presentaría éxito sobre un plan roto. Descarta para
+                            volver a <code>{ejecucion.rama_base}</code>.</>
+                        )}
                       </p>
                       <button className="descartar" onClick={descartar}>
                         <Trash2 size={14} /> Descartar

@@ -243,6 +243,20 @@ class Executor:
         worktree = self._worktree_path(branch)
         gitutil.add_worktree(self.repo, branch, worktree)
 
+        # Marcador "en curso" ANTES de lanzar el backend (decisión D2 del
+        # vocero: lo escribe el Executor, no el consumidor de la cola del Hub).
+        # Si el proceso muere a mitad, el sidecar se queda sin `returncode` y
+        # quien rehidrate sabe que la ejecución no terminó, en vez de suponer
+        # que salió bien.
+        gitutil.escribir_sidecar(worktree, {
+            "estado": "en_curso",
+            "rama": branch,
+            "rama_base": base_branch,
+            "backend": self.backend.name,
+            "titulo": plan.title,
+            "iniciado": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+
         self._on_event("ejecutando", self.backend.name)
         code, output = self.backend.run(_exec_prompt(plan), worktree, allow_commands)
 
@@ -276,6 +290,19 @@ class Executor:
                 self._on_event("verificacion_reintentada", str(verify_returncode))
             else:
                 self._on_event("verificacion_ok", "")
+
+        # Sidecar definitivo: ya se sabe cómo terminó. `returncode` es el dato
+        # que git no puede dar y que decide si el Hub deja commitear.
+        gitutil.escribir_sidecar(worktree, {
+            "estado": "terminado",
+            "rama": branch,
+            "rama_base": base_branch,
+            "backend": self.backend.name,
+            "titulo": plan.title,
+            "returncode": code,
+            "verify_returncode": verify_returncode,
+            "terminado": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
 
         return ExecutionOutcome(
             branch=branch,

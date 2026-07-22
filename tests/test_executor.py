@@ -291,3 +291,54 @@ class TestRepoSinCommits:
         # El worktree ya NO nace vacío: trae los archivos del proyecto.
         assert (Path(out.worktree) / "documento.md").is_file()
         assert out.changed_files
+
+
+class TestSidecarDeEjecucion:
+    """Metadatos que git no puede saber (el returncode, sobre todo), para que
+    una ejecución sobreviva a un reinicio del Hub. Decisiones D1/D2 del vocero
+    (2026-07-22): viven en el directorio ADMINISTRATIVO del worktree y los
+    escribe el Executor."""
+
+    def test_el_sidecar_no_contamina_el_diff_del_vocero(self, git_repo):
+        # La regresión que motivó D1: dentro del árbol, `stage_all` (add -A) lo
+        # metería en el staging, en el diff que revisa el vocero y en el commit.
+        out = Executor(str(git_repo), WriterBackend()).execute(PLAN)
+        assert sorted(out.changed_files) == ["hola.txt", "nuevo.txt"]
+        assert "devvating-ejecucion" not in out.diff
+
+    def test_guarda_returncode_y_rama_base_al_terminar(self, git_repo):
+        out = Executor(str(git_repo), WriterBackend()).execute(PLAN)
+        side = gitutil.leer_sidecar(out.worktree)
+        assert side["estado"] == "terminado"
+        assert side["returncode"] == 0
+        assert side["rama_base"] == "main"   # git no puede deducirla después
+        assert side["rama"] == out.branch
+
+    def test_marcador_en_curso_antes_de_lanzar_el_backend(self, git_repo):
+        # Si el proceso muere a mitad, el sidecar no tiene returncode y quien
+        # rehidrate sabe que NO terminó, en vez de suponer que salió bien.
+        visto = {}
+
+        class BackendQueEspia:
+            name = "espia"
+
+            def run(self, prompt, cwd, allow_commands):
+                visto.update(gitutil.leer_sidecar(cwd) or {})
+                return 0, "ok"
+
+        Executor(str(git_repo), BackendQueEspia()).execute(PLAN)
+        assert visto["estado"] == "en_curso"
+        assert "returncode" not in visto
+
+    def test_se_va_con_el_worktree(self, git_repo):
+        # La virtud que defendía la opción in-tree se conserva igual: el
+        # directorio administrativo lo borra `git worktree remove`.
+        out = Executor(str(git_repo), WriterBackend()).execute(PLAN)
+        gitdir = gitutil.gitdir_de_worktree(out.worktree)
+        assert Path(gitdir, "devvating-ejecucion.json").is_file()
+        gitutil.remove_worktree(str(git_repo), out.worktree)
+        assert not Path(gitdir).exists()
+
+    def test_leer_sidecar_sin_worktree_da_none(self, git_repo, tmp_path):
+        assert gitutil.leer_sidecar(str(tmp_path)) is None
+        assert gitutil.gitdir_de_worktree(str(git_repo)) is None  # no es worktree

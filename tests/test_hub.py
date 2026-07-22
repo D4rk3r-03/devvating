@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from devvating import gitutil
 from devvating.hub import _debate_worker, crear_app
 from tests.conftest import StubAdapter
 
@@ -932,3 +933,97 @@ class TestWorktreesEnElHub:
         app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
         with TestClient(app) as c:
             assert c.get("/api/worktrees").json() == {"worktrees": [], "huerfanos": []}
+
+
+class TestRehidratarEjecucion:
+    """Fase A: una ejecución pendiente sobrevive al reinicio del Hub.
+
+    No hay estado persistido en paralelo a git: el worktree con cambios ES la
+    ejecución; del sidecar solo sale lo que git no puede saber. Reiniciar deja
+    de costar el trabajo que esperaba tu decisión.
+    """
+
+    def _ejecutar(self, git_repo, rama=None):
+        from devvating.executor import ExecutionPlan, Executor
+
+        class Backend:
+            name = "stub"
+
+            def run(self, prompt, cwd, allow_commands):
+                (Path(cwd) / "aplicado.txt").write_text("cambio\n", encoding="utf-8")
+                return 0, "ok"
+
+        return Executor(str(git_repo), Backend()).execute(
+            ExecutionPlan(text="plan", title="demo"), branch=rama
+        )
+
+    def test_hub_nuevo_recupera_la_ejecucion_pendiente(self, git_repo, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        out = self._ejecutar(git_repo)
+        # Un Hub que arranca DESPUÉS: nunca vio correr esa ejecución.
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            p = c.get("/api/ejecucion-pendiente").json()["pendiente"]
+            assert p["rama"] == out.branch
+            assert p["rama_base"] == "main"      # del sidecar; git no la deduce
+            assert p["returncode"] == 0
+            assert "aplicado.txt" in p["archivos"]
+            assert "cambio" in p["diff"]         # el diff se lee de git al vuelo
+
+    def test_puede_commitear_lo_recuperado(self, git_repo, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        self._ejecutar(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            r = c.post("/api/commit", json={"mensaje": "aplico el plan"})
+            assert r.status_code == 200 and r.json()["sha"]
+
+    def test_sin_sidecar_no_deja_commitear_pero_si_descartar(
+        self, git_repo, tmp_path, monkeypatch
+    ):
+        # Degradado conservador: sin saber cómo terminó, no se presenta como
+        # commiteable. `returncode` None ya bloquea (None != 0).
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        out = self._ejecutar(git_repo)
+        gitdir = gitutil.gitdir_de_worktree(out.worktree)
+        Path(gitdir, "devvating-ejecucion.json").unlink()
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            assert c.get("/api/ejecucion-pendiente").json()["pendiente"]["returncode"] is None
+            assert c.post("/api/commit", json={"mensaje": "x"}).status_code == 409
+            assert c.post("/api/descartar").status_code == 200
+
+    def test_worktree_sin_cambios_no_es_una_ejecucion_pendiente(
+        self, git_repo, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        gitutil.add_worktree(str(git_repo), "devvating/vacia", str(tmp_path / "vacia"))
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            assert c.get("/api/ejecucion-pendiente").json()["pendiente"] is None
+
+    def test_con_varias_pendientes_toma_la_mas_reciente(
+        self, git_repo, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        # Ramas explícitas: el nombre por defecto lleva timestamp al segundo y
+        # dos ejecuciones seguidas chocarían ("la rama ya existe").
+        vieja = self._ejecutar(git_repo, "devvating/vieja")
+        nueva = self._ejecutar(git_repo, "devvating/nueva")
+        # Envejecer la primera para que el orden no dependa del reloj del test.
+        gitutil.escribir_sidecar(vieja.worktree, {
+            **(gitutil.leer_sidecar(vieja.worktree) or {}),
+            "terminado": "2020-01-01T00:00:00",
+        })
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            assert c.get("/api/ejecucion-pendiente").json()["pendiente"]["rama"] == nueva.branch
+            # La otra no se pierde: sigue listada como worktree colgando.
+            ramas = [w["rama"] for w in c.get("/api/worktrees").json()["worktrees"]]
+            assert vieja.branch in ramas
+
+    def test_repo_sin_ejecuciones_responde_vacio(self, cliente):
+        c, _ = cliente
+        assert c.get("/api/ejecucion-pendiente").json() == {"pendiente": None}

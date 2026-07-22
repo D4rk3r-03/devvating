@@ -304,11 +304,46 @@ def crear_app(
 
     _csrf = Depends(_requiere_csrf)
 
+    def _rehidratar_ejecucion() -> None:
+        """Recupera la ejecución pendiente tras un reinicio (Fase A del plan).
+
+        No hay estado persistido en paralelo a git: un worktree bajo
+        `devvating/` con cambios sin commitear ES la ejecución pendiente. Del
+        sidecar solo sale lo que git no puede saber (`returncode`, rama base).
+
+        Sin sidecar o sin `returncode` (el proceso murió a mitad), queda en
+        None: `commit_cambios` compara `!= 0` y lo bloquea, así que el
+        degradado conservador —solo descartar— sale gratis. Con varias
+        pendientes se toma la más reciente; el resto siguen visibles en
+        `/api/worktrees`.
+        """
+        if not gitutil.is_git_repo(repo):
+            return
+        candidatas = []
+        for w in gitutil.list_worktrees(repo):
+            if not w["existe"] or not w["tiene_cambios"]:
+                continue
+            side = gitutil.leer_sidecar(w["path"]) or {}
+            marca = side.get("terminado") or side.get("iniciado") or ""
+            candidatas.append((marca, w, side))
+        if not candidatas:
+            return
+        candidatas.sort(key=lambda c: c[0], reverse=True)
+        _, w, side = candidatas[0]
+        app.state.ultima_ejecucion = {
+            "rama": w["rama"],
+            "base": side.get("rama_base", ""),
+            "repo": repo,
+            "worktree": w["path"],
+            "returncode": side.get("returncode"),  # None => no se ofrece commit
+        }
+
     @app.on_event("startup")
     async def _arrancar() -> None:
         app.state.loop = asyncio.get_running_loop()
         app.state.cola = asyncio.Queue()
         asyncio.create_task(_difundir())
+        _rehidratar_ejecucion()
 
     async def _difundir() -> None:
         while True:
@@ -565,6 +600,28 @@ def crear_app(
             daemon=True,
         ).start()
         return {"ok": True}
+
+    @app.get("/api/ejecucion-pendiente")
+    def ejecucion_pendiente() -> dict:
+        """La ejecución que espera decisión del vocero, con su diff.
+
+        Existe para que la rehidratación del arranque sea VISIBLE: sin esto el
+        Hub aceptaría commitear tras un reinicio, pero el front no mostraría
+        nada que commitear. El diff se lee del worktree en el momento, no de
+        una copia guardada — git es la fuente.
+        """
+        ue = app.state.ultima_ejecucion
+        if not ue:
+            return {"pendiente": None}
+        wt = ue.get("worktree") or ue["repo"]
+        return {"pendiente": {
+            "rama": ue["rama"],
+            "rama_base": ue.get("base", ""),
+            "worktree": ue.get("worktree", ""),
+            "returncode": ue.get("returncode"),
+            "archivos": gitutil.staged_changed_files(wt),
+            "diff": gitutil.staged_diff(wt),
+        }}
 
     @app.post("/api/commit", dependencies=[_csrf])
     def commit_cambios(cuerpo: dict) -> dict:

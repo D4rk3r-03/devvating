@@ -6,6 +6,7 @@ rama y se muestra el diff antes de que el vocero decida hacer commit o descartar
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -82,6 +83,64 @@ def prune_worktrees(repo: str) -> None:
     _run(["worktree", "prune"], repo)
 
 
+# Metadatos de la ejecución que git NO puede saber (el returncode del backend,
+# sobre todo: es lo que bloquea commitear un plan roto). Viven en el directorio
+# ADMINISTRATIVO del worktree (`<repo>/.git/worktrees/<n>/`) y no dentro de su
+# árbol —decisión D1 del vocero, 2026-07-22—: ahí `git add -A` no los ve, así
+# que no contaminan el diff que revisa el vocero, y aun así `git worktree
+# remove` se los lleva consigo, que era la virtud de ponerlos dentro.
+_SIDECAR = "devvating-ejecucion.json"
+
+
+def gitdir_de_worktree(path: str) -> str | None:
+    """Directorio administrativo de un worktree, o None si no lo es.
+
+    En un worktree, `.git` es un ARCHIVO con `gitdir: <ruta>` en vez de un
+    directorio. Es el mismo parseo que usa `worktrees_huerfanos`.
+    """
+    marcador = os.path.join(path, ".git")
+    if not os.path.isfile(marcador):
+        return None
+    try:
+        with open(marcador, encoding="utf-8") as fh:
+            contenido = fh.read().strip()
+    except OSError:
+        return None
+    if not contenido.startswith("gitdir:"):
+        return None
+    return contenido[len("gitdir:"):].strip()
+
+
+def escribir_sidecar(worktree: str, datos: dict) -> bool:
+    """Guarda los metadatos de la ejecución. False si no se pudo (no fatal)."""
+    gitdir = gitdir_de_worktree(worktree)
+    if gitdir is None or not os.path.isdir(gitdir):
+        return False
+    try:
+        with open(os.path.join(gitdir, _SIDECAR), "w", encoding="utf-8") as fh:
+            json.dump(datos, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        return False
+    return True
+
+
+def leer_sidecar(worktree: str) -> dict | None:
+    """Metadatos de la ejecución, o None si no hay (o están ilegibles).
+
+    None significa "no sé cómo terminó", y el llamador debe degradar de forma
+    conservadora: sin returncode no se ofrece commitear.
+    """
+    gitdir = gitdir_de_worktree(worktree)
+    if gitdir is None:
+        return None
+    try:
+        with open(os.path.join(gitdir, _SIDECAR), encoding="utf-8") as fh:
+            datos = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return datos if isinstance(datos, dict) else None
+
+
 def worktrees_huerfanos(base: str) -> list[str]:
     """Directorios de `base` cuyo repositorio padre ya no existe.
 
@@ -96,18 +155,10 @@ def worktrees_huerfanos(base: str) -> list[str]:
     huerfanos = []
     for nombre in os.listdir(base):
         ruta = os.path.join(base, nombre)
-        marcador = os.path.join(ruta, ".git")
-        if not os.path.isdir(ruta) or not os.path.isfile(marcador):
+        if not os.path.isdir(ruta):
             continue
-        try:
-            with open(marcador, encoding="utf-8") as fh:
-                contenido = fh.read().strip()
-        except OSError:
-            continue
-        if not contenido.startswith("gitdir:"):
-            continue
-        gitdir = contenido[len("gitdir:"):].strip()
-        if not os.path.exists(gitdir):
+        gitdir = gitdir_de_worktree(ruta)
+        if gitdir is not None and not os.path.exists(gitdir):
             huerfanos.append(ruta)
     return huerfanos
 
