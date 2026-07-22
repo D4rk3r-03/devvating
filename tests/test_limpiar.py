@@ -9,14 +9,18 @@ from __future__ import annotations
 
 import os
 import subprocess
-import tempfile
 
 from devvating import gitutil, limpiar
 
 
-def _worktree(git_repo, branch: str, sucio: bool = False) -> str:
-    """Crea un worktree de ejecución; `sucio` le deja cambios sin commitear."""
-    path = os.path.join(tempfile.mkdtemp(prefix="dv-limpiar-test-"), "wt")
+def _worktree(git_repo, branch: str, sucio: bool = False, base=None) -> str:
+    """Crea un worktree de ejecución; `sucio` le deja cambios sin commitear.
+
+    La ruta cuelga del tmp_path del test (no de `tempfile.mkdtemp`): estos
+    tests no pueden reintroducir la misma fuga que arreglan.
+    """
+    raiz = base if base is not None else git_repo.parent / "wt-test"
+    path = os.path.join(str(raiz), branch.replace("/", "-"))
     gitutil.add_worktree(str(git_repo), branch, path)
     if sucio:
         with open(os.path.join(path, "trabajo.txt"), "w", encoding="utf-8") as fh:
@@ -87,3 +91,45 @@ class TestLimpieza:
         subprocess.run(["rm", "-rf", path], check=True)
         assert limpiar.main(["--repo", str(git_repo), "--yes"]) == 0
         assert gitutil.list_worktrees(str(git_repo)) == []
+
+
+class TestHuerfanos:
+    """Directorios cuyo repo padre desapareció: ningún repo vivo los ve, así
+    que `git worktree prune` no los alcanza. Es como se acumularon 65."""
+
+    def _huerfano(self, base, gitdir_inexistente="/tmp/repo-que-ya-no-existe/.git"):
+        d = base / "devvating-viejo-abc123"
+        d.mkdir(parents=True)
+        (d / ".git").write_text(f"gitdir: {gitdir_inexistente}\n", encoding="utf-8")
+        (d / "resto.txt").write_text("basura\n", encoding="utf-8")
+        return d
+
+    def test_detecta_solo_los_de_repo_desaparecido(self, tmp_path, git_repo):
+        base = tmp_path / "base"
+        huerfano = self._huerfano(base)
+        # Uno vivo (su gitdir existe) NO debe considerarse huérfano.
+        vivo = base / "devvating-vivo-def456"
+        vivo.mkdir()
+        (vivo / ".git").write_text(f"gitdir: {git_repo}/.git\n", encoding="utf-8")
+        encontrados = gitutil.worktrees_huerfanos(str(base))
+        assert encontrados == [str(huerfano)]
+
+    def test_base_inexistente_no_falla(self, tmp_path):
+        assert gitutil.worktrees_huerfanos(str(tmp_path / "no-existe")) == []
+
+    def test_limpiar_los_borra(self, tmp_path, git_repo, monkeypatch):
+        base = tmp_path / "base"
+        huerfano = self._huerfano(base)
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(base))
+        assert limpiar.main(["--repo", str(git_repo), "--yes"]) == 0
+        assert not huerfano.exists()
+
+    def test_se_limpian_aunque_el_repo_no_tenga_worktrees(self, tmp_path, git_repo, monkeypatch):
+        # Los huérfanos no dependen del repo: el flujo no debe saltárselos
+        # por no haber nada registrado que limpiar.
+        base = tmp_path / "base"
+        huerfano = self._huerfano(base)
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(base))
+        assert gitutil.list_worktrees(str(git_repo)) == []  # nada registrado
+        limpiar.main(["--repo", str(git_repo), "--yes"])
+        assert not huerfano.exists()

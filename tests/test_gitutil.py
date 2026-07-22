@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import tempfile
 
 import pytest
 
@@ -15,10 +14,13 @@ from devvating import gitutil
 
 
 def _worktree(git_repo, branch="devvating/x"):
-    """Crea un worktree desechable (en el temp del sistema) y devuelve su ruta."""
-    path = os.path.join(
-        tempfile.mkdtemp(prefix="dv-wt-test-"), branch.replace("/", "-")
-    )
+    """Crea un worktree desechable y devuelve su ruta.
+
+    Cuelga del tmp_path del test (via git_repo.parent), no de
+    `tempfile.mkdtemp`: en el temp del sistema quedaba para siempre, que es la
+    fuga que motivó `devvating limpiar`.
+    """
+    path = os.path.join(str(git_repo.parent / "wt-test"), branch.replace("/", "-"))
     return gitutil.add_worktree(str(git_repo), branch, path)
 
 

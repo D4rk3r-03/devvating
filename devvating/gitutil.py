@@ -72,6 +72,36 @@ def prune_worktrees(repo: str) -> None:
     _run(["worktree", "prune"], repo)
 
 
+def worktrees_huerfanos(base: str) -> list[str]:
+    """Directorios de `base` cuyo repositorio padre ya no existe.
+
+    Un worktree apunta a su repo por el archivo `.git` (`gitdir: <ruta>`). Si
+    esa ruta desapareció (repo borrado, tmp_path de una corrida de tests), el
+    directorio es basura irrecuperable: su rama vivía en el repo que ya no
+    está, así que no hay nada que rescatar ni ningún repo desde el que
+    `git worktree prune` pueda verlo.
+    """
+    if not os.path.isdir(base):
+        return []
+    huerfanos = []
+    for nombre in os.listdir(base):
+        ruta = os.path.join(base, nombre)
+        marcador = os.path.join(ruta, ".git")
+        if not os.path.isdir(ruta) or not os.path.isfile(marcador):
+            continue
+        try:
+            with open(marcador, encoding="utf-8") as fh:
+                contenido = fh.read().strip()
+        except OSError:
+            continue
+        if not contenido.startswith("gitdir:"):
+            continue
+        gitdir = contenido[len("gitdir:"):].strip()
+        if not os.path.exists(gitdir):
+            huerfanos.append(ruta)
+    return huerfanos
+
+
 def worktree_tiene_cambios(path: str) -> bool:
     """True si el worktree tiene algo sin commitear (staged o en el árbol).
 

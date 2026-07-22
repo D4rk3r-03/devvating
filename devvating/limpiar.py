@@ -20,11 +20,20 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import tempfile
 import time
 
 from rich.console import Console
 
 from . import gitutil
+
+
+def _base_worktrees() -> str:
+    """Misma base que usa Executor._worktree_path (incluida la override)."""
+    return os.environ.get("DEVVATING_WORKTREE_DIR") or os.path.join(
+        tempfile.gettempdir(), "devvating-worktrees"
+    )
 
 
 def _dias_desde(path: str) -> float:
@@ -59,6 +68,15 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[red]'{args.repo}' no es un repositorio git.[/red]")
         return 1
 
+    _limpiar_registrados(console, args)
+    # Siempre después de los registrados, y pase lo que pase con ellos: los
+    # huérfanos no dependen de este repo (ningún repo vivo los ve).
+    _limpiar_huerfanos(console, confirmar=not args.yes)
+    return 0
+
+
+def _limpiar_registrados(console: Console, args) -> None:
+    """Worktrees que el repo todavía conoce (`git worktree list`)."""
     # Poda previa: los registros zombie (git los conoce, el dir ya no existe)
     # desaparecen solos y no hay que preguntar por ellos.
     gitutil.prune_worktrees(args.repo)
@@ -68,8 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         worktrees = [w for w in worktrees if _dias_desde(w["path"]) >= args.dias]
 
     if not worktrees:
-        console.print("[green]No hay worktrees de ejecución que limpiar.[/green]")
-        return 0
+        console.print("[green]No hay worktrees de ejecución registrados que limpiar.[/green]")
+        return
 
     limpiables = [w for w in worktrees if not w["tiene_cambios"] or args.forzar]
     protegidos = [w for w in worktrees if w["tiene_cambios"] and not args.forzar]
@@ -92,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             "[dim]Revísalos y commitea lo que valga, o usa --forzar para "
             "descartar esos cambios (las ramas y sus commits sobreviven).[/dim]"
         )
-        return 0
+        return
 
     if args.forzar and any(w["tiene_cambios"] for w in limpiables):
         console.print(
@@ -107,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         ).strip().lower()
         if resp not in ("y", "s", "yes", "si", "sí"):
             console.print("Cancelado por el vocero.")
-            return 0
+            return
 
     for w in limpiables:
         gitutil.remove_worktree(args.repo, w["path"])
@@ -115,7 +133,37 @@ def main(argv: list[str] | None = None) -> int:
         f"\n[green]✓ {len(limpiables)} worktree(s) retirados.[/green] "
         "[dim]Las ramas siguen ahí; bórralas desde el Hub o con `git branch -D`.[/dim]"
     )
-    return 0
+
+
+def _limpiar_huerfanos(console: Console, confirmar: bool) -> int:
+    """Borra los directorios cuyo repo padre ya no existe (basura pura).
+
+    Van aparte del flujo principal porque ningún repo vivo los ve: no salen en
+    `git worktree list` ni los poda `git worktree prune`. Sin esto quedan para
+    siempre — es como se acumularon 65 en una auditoría.
+    """
+    base = _base_worktrees()
+    huerfanos = gitutil.worktrees_huerfanos(base)
+    if not huerfanos:
+        return 0
+    console.print(
+        f"\n[bold]Huérfanos en {base}[/bold] "
+        "[dim](su repositorio ya no existe: nada que rescatar)[/dim]"
+    )
+    for h in huerfanos:
+        console.print(f"  • {os.path.basename(h)}")
+    if confirmar:
+        resp = console.input(
+            f"\n[bold yellow]Vocero[/bold yellow] · ¿Borrar {len(huerfanos)} "
+            "directorio(s) huérfano(s)? (y/N): "
+        ).strip().lower()
+        if resp not in ("y", "s", "yes", "si", "sí"):
+            console.print("Huérfanos conservados.")
+            return 0
+    for h in huerfanos:
+        shutil.rmtree(h, ignore_errors=True)
+    console.print(f"[green]✓ {len(huerfanos)} huérfano(s) borrados.[/green]")
+    return len(huerfanos)
 
 
 if __name__ == "__main__":
