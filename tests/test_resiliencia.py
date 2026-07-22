@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from devvating.adapters.base import SessionLimitError, TransientProviderError
+from devvating.adapters.base import AgentError, SessionLimitError, TransientProviderError
 from devvating.adapters.cli import (
     ClaudeCliAdapter,
     CliAdapterError,
@@ -127,6 +127,20 @@ class TestBackoffEnOrquestador:
         with pytest.raises(DebateAbortedError):
             orch.run(TOPIC, max_rounds=1)
         assert dormido == []
+
+    def test_excepcion_sin_clasificar_aborta_con_sesion_parcial(self):
+        # Un bug de adaptador/SDK (TypeError, ValueError…) no es AgentError,
+        # pero la red de seguridad debe ser la misma: DebateAbortedError con
+        # los turnos ya pagados — nunca un traceback que lo pierda todo.
+        a = StubAdapter("claude", ["A0"])
+        b = StubAdapter("gemini", [TypeError("'NoneType' object is not subscriptable")])
+        orch, dormido = _orq(a, b)
+        with pytest.raises(DebateAbortedError) as info:
+            orch.run(TOPIC, max_rounds=1)
+        assert [t.agent for t in info.value.session.turns] == ["claude"]
+        assert isinstance(info.value.causa, AgentError)
+        assert "TypeError" in str(info.value.causa)
+        assert dormido == []  # sin clasificar: no reintentable
 
     def test_emite_eventos_de_reintento(self):
         eventos: list[tuple[str, str]] = []

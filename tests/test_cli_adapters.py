@@ -262,3 +262,40 @@ class TestFactory:
         cfg = Config(anthropic_api_key="", gemini_api_key="")
         with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
             make_agent("claude", "api", cfg, str(tmp_path))
+
+
+class TestStdinCerrado:
+    """Los subprocess de CLI corren con stdin=DEVNULL: un CLI que sondee la
+    entrada (agy/gemini sin flags interactivos) heredaría el terminal y se
+    quedaría "sin responder" hasta reventar el timeout del turno."""
+
+    def _espiar_popen(self, monkeypatch):
+        import subprocess
+
+        capturado: dict = {}
+        original = subprocess.Popen
+
+        def espia(*args, **kwargs):
+            capturado.update(kwargs)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr("devvating.adapters.cli.subprocess.Popen", espia)
+        return capturado
+
+    def test_camino_por_turnos_no_hereda_stdin(self, fake_bin, tmp_path, monkeypatch):
+        import subprocess
+
+        capturado = self._espiar_popen(monkeypatch)
+        binario = fake_bin("gem", 'echo "hola"')
+        out = GeminiCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
+        assert out == "hola"
+        assert capturado.get("stdin") == subprocess.DEVNULL
+
+    def test_camino_streaming_no_hereda_stdin(self, fake_bin, tmp_path, monkeypatch):
+        import subprocess
+
+        capturado = self._espiar_popen(monkeypatch)
+        binario = fake_bin("cla", f"echo '{_result(result='ok')}'")
+        out = ClaudeCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
+        assert out == "ok"
+        assert capturado.get("stdin") == subprocess.DEVNULL

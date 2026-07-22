@@ -14,7 +14,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from ..tools.registry import ToolRegistry
-from .base import TransientProviderError, TurnUsage
+from .base import AgentError, TransientProviderError, TurnUsage
 
 
 def _usage_de_respuesta(response) -> TurnUsage:
@@ -78,15 +78,34 @@ class GeminiAdapter:
                 if codigo == 429 or (isinstance(codigo, int) and codigo >= 500):
                     # 429/5xx: transitorio — el orquestador decide reintentar.
                     raise TransientProviderError(f"API de Gemini: {exc}") from exc
-                raise
+                # Resto de APIError: clasificado como fallo de agente genérico
+                # (no reintentable), cumpliendo la taxonomía de base.py.
+                raise AgentError(f"API de Gemini: {exc}") from exc
             total = total + _usage_de_respuesta(response)
+            # La API puede devolver candidates vacío/None (prompt bloqueado) o
+            # content/parts en None (SAFETY, MALFORMED_FUNCTION_CALL, respuesta
+            # vacía) — pasa sobre todo en prompts grandes como la síntesis.
+            # Indexar a ciegas era un TypeError/AttributeError sin clasificar.
+            # Se trata como transitorio: en la práctica reintentar lo cura.
+            if not response.candidates:
+                raise TransientProviderError(
+                    "API de Gemini: respuesta sin candidatos (¿prompt bloqueado?)."
+                )
             candidate = response.candidates[0]
-            parts = candidate.content.parts or []
+            content = candidate.content
+            parts = (content.parts if content is not None else None) or []
 
             fn_calls = [p.function_call for p in parts if p.function_call]
             if not fn_calls:
+                texto = "".join(p.text for p in parts if getattr(p, "text", None)).strip()
+                if not texto:
+                    razon = getattr(candidate, "finish_reason", None)
+                    raise TransientProviderError(
+                        "API de Gemini: turno sin texto ni llamadas a herramientas "
+                        f"(finish_reason={razon})."
+                    )
                 self._cerrar_turno(total)
-                return (response.text or "").strip()
+                return texto
 
             # Eco del turno del modelo, luego los resultados de las funciones.
             contents.append(candidate.content)

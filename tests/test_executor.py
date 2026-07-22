@@ -206,3 +206,19 @@ class TestClaudeCodeBackendArgv:
             "plan", str(tmp_path), allow_commands=False
         )
         assert code == 0 and "sin-clave" in output
+
+    def test_no_hereda_stdin_al_subprocess(self, tmp_path):
+        # Mismo blindaje que adapters/cli: sin stdin cerrado, el CLI hereda el
+        # terminal y puede quedarse esperando entrada en medio de la ejecución.
+        fake = tmp_path / "claude"
+        fake.write_text(
+            "#!/bin/bash\n"
+            'if [ -e /proc/self/fd/0 ] && [ "$(readlink /proc/self/fd/0)" = "/dev/null" ]; '
+            "then echo stdin-nulo; else echo stdin-heredado; fi\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        code, output = ClaudeCodeBackend(binary=str(fake)).run(
+            "plan", str(tmp_path), allow_commands=False
+        )
+        assert code == 0 and "stdin-nulo" in output

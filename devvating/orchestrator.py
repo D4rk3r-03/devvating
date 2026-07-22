@@ -316,6 +316,14 @@ class Orchestrator:
             # parcial — los turnos completados nunca se pierden (plan §13).
             session.usage_totals = self._totalizar(session)
             raise DebateAbortedError(session, exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            # Fallo SIN clasificar (bug de un adaptador o de un SDK que escapó
+            # a la taxonomía de base.py): misma red de seguridad que AgentError.
+            # Sin esto, un TypeError del SDK a mitad de síntesis tiraba TODOS
+            # los turnos ya pagados sin transcript parcial.
+            session.usage_totals = self._totalizar(session)
+            causa = AgentError(f"{type(exc).__name__}: {exc}")
+            raise DebateAbortedError(session, causa) from exc
         finally:
             # No dejar el callback de streaming colgando: el adaptador puede
             # sobrevivir a esta sesión (en el Hub se reusa el objeto), y un

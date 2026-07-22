@@ -96,6 +96,10 @@ def _run(
     try:
         proc = subprocess.Popen(
             argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            # stdin cerrado (EOF inmediato): un CLI que sondee la entrada al no
+            # hallar flags interactivos se quedaría esperando el terminal
+            # heredado — el "no responde" hasta reventar el timeout.
+            stdin=subprocess.DEVNULL,
             text=True, env=env_suscripcion(),
             # Grupo de procesos propio: al cancelar/timeout matamos el árbol
             # entero (el CLI puede lanzar hijos; matar solo el padre los deja
@@ -172,6 +176,7 @@ def _run_stream(
     try:
         proc = subprocess.Popen(
             argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,  # mismo motivo que en _run
             text=True, env=env_suscripcion(), start_new_session=True,
         )
     except FileNotFoundError as exc:

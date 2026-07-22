@@ -146,6 +146,9 @@ class ClaudeCodeBackend:
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                # stdin cerrado: sin él, el CLI hereda el terminal y puede
+                # quedarse esperando entrada (mismo blindaje que adapters/cli).
+                stdin=subprocess.DEVNULL,
                 # Sin ANTHROPIC_API_KEY heredada: el CLI debe usar el login de
                 # suscripción, no facturar contra la clave del backend api (D5).
                 env=env_suscripcion(),
