@@ -3,6 +3,7 @@
 Subcomandos:
     debate      Corre un debate multi-agente sobre un tema.
     ejecutar    Aplica un plan aprobado en una rama (fase de ejecución).
+    historial   Índice global de lo debatido en esta máquina.
     limpiar     Retira los worktrees de ejecución que quedaron colgando.
     pruebavida  Prueba de vida de los adaptadores (M0).
 """
@@ -18,6 +19,7 @@ _USAGE = (
     "  debate      Corre un debate multi-agente sobre un tema.\n"
     "  ejecutar    Aplica un plan aprobado en una rama.\n"
     "  reporte     Genera un reporte HTML desde un transcript.\n"
+    "  historial   Todo lo debatido en esta máquina, de todos tus proyectos.\n"
     "  limpiar     Retira los worktrees de ejecución que quedaron colgando.\n"
     "  hub         Sala de debate web local (requiere extra [hub]).\n"
     "  pruebavida  Prueba de vida de los adaptadores.\n\n"
@@ -49,6 +51,10 @@ def main(argv: list[str] | None = None) -> int:
         from . import limpiar
 
         return limpiar.main(rest)
+    if cmd == "historial":
+        from . import historial
+
+        return historial.main(rest)
     if cmd == "hub":
         try:
             from . import hub

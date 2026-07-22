@@ -651,3 +651,31 @@ D9, que prohíbe aceptar rutas del sistema en el cuerpo de una petición.
 
 Queda pendiente la fase C: índice global en `~/.devvating/` como punteros
 reconstruibles a los transcripts, que siguen viviendo junto a su repo.
+
+### D13 — Índice global de debates (fase C de D11, 2026-07-22)
+
+Última pieza del plan debatido: una vista de todo lo que devvating ha hecho en
+la máquina, sin recorrer proyecto por proyecto.
+
+- **Índice, no reemplazo** (lo que el debate zanjó): los transcripts siguen
+  junto a su repo, porque un debate es SOBRE un repositorio y así su historia
+  viaja con el clon. `~/.devvating/registro.db` (SQLite, por atomicidad entre
+  CLI y Hub) guarda **solo punteros y metadatos**: repo, ruta, tema, fecha,
+  estado, decisiones abiertas y coste. Nunca la síntesis ni los turnos.
+- **Prescindible por diseño**: al no duplicar contenido no puede contradecir a
+  la fuente, y `devvating historial --reindexar` lo reconstruye entero desde
+  los transcripts. Hay un test que borra el `.db` y lo recupera sin pérdida.
+- **Alta automática en `debate._save_transcript`**, el punto único por el que
+  pasan la CLI y el Hub. Nunca levanta: el índice es una comodidad y un fallo
+  suyo no puede costar un debate ya pagado.
+- **`devvating historial`** lista lo indexado (`--pendientes` filtra lo que
+  espera algo del vocero: decisiones abiertas o debates a medias). Las entradas
+  cuyo transcript ya no existe se marcan `✗` en vez de fingirse vivas, y
+  `--limpiar` las olvida.
+- **Trampa de la suite**: varios tests del Hub corren el debate en un hilo
+  daemon que puede terminar tras el teardown, cuando monkeypatch ya restauró el
+  entorno — y daban de alta en el `~/.devvating` real (verificado: aparecieron
+  debates `test_*` en el historial del vocero). Por eso el aislamiento del
+  registro es un fixture de SESIÓN, no por test.
+
+Con esto quedan cerradas las tres fases de D11.

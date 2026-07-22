@@ -62,10 +62,13 @@ devvating reporte transcripts/<timestamp>-<topic>.json
 devvating ejecutar --repo /path/to/project \
     --from-transcript transcripts/<timestamp>-<topic>.json
 
-# 5) Reclaim the isolated worktrees left behind by past executions:
+# 5) See every debate run on this machine, across all your projects:
+devvating historial            # add --pendientes for the ones awaiting you
+
+# 6) Reclaim the isolated worktrees left behind by past executions:
 devvating limpiar --repo /path/to/project
 
-# 6) Or run it all from the browser — the debate room, live:
+# 7) Or run it all from the browser — the debate room, live:
 pip install -e ".[hub]"
 cd devvating-ui && npm install && npm run build && cd ..
 devvating hub          # → http://127.0.0.1:8777

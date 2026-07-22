@@ -6,6 +6,7 @@ poder verificar el flujo del orquestador y del ejecutor en local y en CI.
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -48,6 +49,27 @@ class StubAdapter:
         return respuesta
 
 
+@pytest.fixture(scope="session", autouse=True)
+def registro_de_sesion_aislado(tmp_path_factory):
+    """Red de seguridad de SESIÓN para el índice global (D13).
+
+    El aislamiento por test no basta: varios tests del Hub lanzan el debate en
+    un hilo daemon que puede terminar DESPUÉS del teardown, cuando monkeypatch
+    ya restauró el entorno — y entonces daría de alta en el `~/.devvating` del
+    usuario. Verificado en real: aparecieron debates llamados `test_*` en su
+    historial. Esta capa dura toda la sesión, así que un hilo rezagado sigue
+    escribiendo en un temporal.
+    """
+    d = tmp_path_factory.mktemp("registro-sesion")
+    previo = os.environ.get("DEVVATING_REGISTRO_DIR")
+    os.environ["DEVVATING_REGISTRO_DIR"] = str(d)
+    yield
+    if previo is None:
+        os.environ.pop("DEVVATING_REGISTRO_DIR", None)
+    else:
+        os.environ["DEVVATING_REGISTRO_DIR"] = previo
+
+
 @pytest.fixture(autouse=True)
 def worktrees_aislados(tmp_path, monkeypatch):
     """Confina los worktrees de la ejecución al tmp_path del test.
@@ -60,6 +82,10 @@ def worktrees_aislados(tmp_path, monkeypatch):
     sin acordarse de nada, y pytest borra el tmp_path por él.
     """
     monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "worktrees"))
+    # Y el índice global (D13) al mismo tmp_path: guardar un transcript da de
+    # alta en él, así que sin esto la suite escribiría en ~/.devvating del
+    # usuario y su historial real se llenaría de debates de prueba.
+    monkeypatch.setenv("DEVVATING_REGISTRO_DIR", str(tmp_path / "registro"))
 
 
 @pytest.fixture

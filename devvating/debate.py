@@ -31,6 +31,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from . import agentes as banco
+from . import registro
 from . import roles
 from . import rotation
 from .adapters.base import AgentAdapter, SessionLimitError, TurnUsage
@@ -56,6 +57,11 @@ def _save_transcript(session: DebateSession, repo_root: str, parcial: bool = Fal
     path.write_text(
         json.dumps(asdict(session), ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    # Alta en el índice global (D13). Va DESPUÉS de escribir el transcript y
+    # nunca levanta: el índice es una comodidad reconstruible, así que un fallo
+    # suyo no puede costar un debate ya pagado. Este es el punto único por el
+    # que pasan la CLI y el Hub, así que basta con engancharlo aquí.
+    registro.registrar(path, repo_root)
     return path
 
 
