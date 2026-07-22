@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import {
   Ban, Check, FileText, GitBranch, Hand, ListChecks, Play, RefreshCw, RotateCcw,
-  Scale, Send, Swords, Trash2, TriangleAlert, Boxes,
+  Scale, Send, Swords, Trash2, TriangleAlert, Boxes, History, Inbox,
 } from "lucide-react";
 import "./App.css";
 
@@ -47,6 +47,21 @@ type Worktree = { path: string; rama: string; existe: boolean; tiene_cambios: bo
 // en vivo, pero recuperable en cualquier momento: reiniciar el Hub ya no
 // cuesta perder el plan ni la posibilidad de aplicarlo.
 type RepoServido = { id: string; ruta: string };
+// Índice global (D13): abarca toda la máquina, así que un debate puede venir
+// de un repo que este Hub no sirve — se muestra, pero sin acciones.
+type DebateIndexado = {
+  transcript: string; repo: string; proyecto: string; repo_id: string | null;
+  tema: string; fecha: string; convergio: number; parcial: number;
+  decisiones_abiertas: number; coste: number | null;
+  existe: boolean; accionable: boolean;
+};
+// Algo que espera una decisión tuya, venga de donde venga.
+type Pendiente = {
+  tipo: "debate_a_medias" | "decisiones" | "ejecucion" | "rama_sin_fusionar";
+  repo_id: string; proyecto: string; detalle: string;
+  transcript?: string; tema?: string; fecha?: string;
+  rama?: string; cuantas?: number;
+};
 type Recuperada = {
   rama: string; rama_base: string; worktree: string;
   returncode: number | null; archivos: string[]; diff: string;
@@ -233,6 +248,11 @@ export default function App() {
   // rutas se muestran, pero nunca viajan de vuelta al servidor (D9).
   const [repos, setRepos] = useState<RepoServido[]>([]);
   const [repoId, setRepoId] = useState("");
+  // Vista global: el índice de todo lo debatido y lo que espera tu decisión.
+  // Son de toda la máquina, no del repo activo, así que van aparte.
+  const [indexados, setIndexados] = useState<DebateIndexado[]>([]);
+  const [pendientes, setPendientes] = useState<Pendiente[]>([]);
+  const [vistaGlobal, setVistaGlobal] = useState(false);
 
   const [tema, setTema] = useState("");
   const [files, setFiles] = useState("");
@@ -318,6 +338,47 @@ export default function App() {
         setWorktrees(d.worktrees ?? []); setHuerfanos(d.huerfanos ?? []);
       });
 
+  const cargarGlobal = () => {
+    fetch("/api/historial").then((r) => r.json())
+      .then((d) => setIndexados(d.debates ?? []));
+    fetch("/api/pendientes").then((r) => r.json())
+      .then((d) => setPendientes(d.pendientes ?? []));
+  };
+
+  const reindexar = async () => {
+    const r = await post("/api/historial/reindexar");
+    if (!r.ok) { setAviso("No se pudo reindexar."); return; }
+    const d = await r.json();
+    setAviso(`Índice reconstruido: ${d.indexados} debate(s).`);
+    cargarGlobal();
+  };
+
+  // Ir a lo que un pendiente pide: cambiar al repo que lo contiene y abrir su
+  // debate. Los de tipo rama/ejecución no tienen transcript que abrir.
+  const atender = async (p: Pendiente) => {
+    if (p.repo_id !== repoId) {
+      setRepoId(p.repo_id);
+      cargarTranscripts(p.repo_id); cargarRamas(p.repo_id);
+      cargarWorktrees(p.repo_id); cargarRecuperada(p.repo_id);
+    }
+    setVistaGlobal(false);
+    if (p.transcript) {
+      const r = await fetch(
+        `/api/transcripts/${encodeURIComponent(p.transcript)}?repo_id=${encodeURIComponent(p.repo_id)}`);
+      if (!r.ok) { setAviso("No se pudo abrir ese debate."); return; }
+      const d = await r.json();
+      const decisiones: Decision[] = d.decisiones ?? [];
+      setArchivado({
+        nombre: p.transcript, tema: d.topic?.prompt ?? "(sin tema)",
+        sintesis: d.synthesis ?? "", sintetizador: d.synthesizer ?? "?",
+        convergio: !!d.converged, decisiones, estado: d.estado ?? "",
+        parcial: p.transcript.endsWith(".partial.json"),
+      });
+      setPendientesArchivado(
+        decisiones.filter((x) => x.crucial && !x.resuelta).map((x) => x.pregunta));
+    }
+  };
+
   const cargarRecuperada = (rid = repoId) =>
     fetch(rid ? `/api/ejecucion-pendiente?repo_id=${encodeURIComponent(rid)}`
               : "/api/ejecucion-pendiente")
@@ -363,6 +424,7 @@ export default function App() {
     cargarRamas();
     cargarWorktrees();
     cargarRecuperada();
+    cargarGlobal();
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.onmessage = (ev) => {
@@ -488,8 +550,12 @@ export default function App() {
   // worktrees siguen el mismo ciclo — cada ejecución crea uno, y commitear o
   // descartar lo retira.
   useEffect(() => {
-    cargarRamas(); cargarWorktrees(); cargarRecuperada();
+    cargarRamas(); cargarWorktrees(); cargarRecuperada(); cargarGlobal();
   }, [cierre, ejecucionEnVivo?.estado]);
+
+  // Un debate que termina cambia el índice (uno nuevo) y puede dejar
+  // decisiones abiertas, así que la vista global se refresca con él.
+  useEffect(() => { if (fin) cargarGlobal(); }, [fin]);
 
   useEffect(() => {
     finRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -749,6 +815,16 @@ export default function App() {
         <header className="barra-estado glass-panel">
           <span className={`status-dot ${corriendo ? "progress" : "active"}`} />
           <span>{corriendo ? "debate en curso" : "en reposo"}</span>
+          {/* Entrada a la vista global: lo que espera decisión se ve desde
+              cualquier pantalla, sin tener que ir a buscarlo repo por repo. */}
+          <button className={`btn-global${pendientes.length ? " con-pendientes" : ""}`}
+            onClick={() => { setVistaGlobal(!vistaGlobal); cargarGlobal(); }}
+            title="Historial de todos tus proyectos y lo que espera tu decisión">
+            <History size={13} />
+            {pendientes.length > 0
+              ? `${pendientes.length} te espera${pendientes.length > 1 ? "n" : ""}`
+              : "historial"}
+          </button>
           {config && <span className="tema-actual" title={config.tema}>
             {nombreAgente(config.agentes[0], alias)} <Swords size={13} /> {nombreAgente(config.agentes[1], alias)}
             {" · "}≤{config.rounds} rondas{config.profundo ? " · profundo" : ""}
@@ -763,7 +839,98 @@ export default function App() {
         </header>
 
         <section className="feed">
-          {items.length === 0 && !pendiente && !fin && (
+          {vistaGlobal && (
+            <div className="panel-global glass-panel animate-fade-in">
+              <h3>
+                <History size={16} /> Todos tus proyectos
+                <button className="cerrar-archivado" title="Cerrar"
+                  onClick={() => setVistaGlobal(false)}><Ban size={14} /></button>
+              </h3>
+
+              {pendientes.length > 0 ? (
+                <>
+                  <h4 className="sub-global"><Inbox size={14} /> Te espera</h4>
+                  <ul className="lista-pendientes">
+                    {pendientes.map((p, i) => (
+                      <li key={i} className={`pend-${p.tipo}`}>
+                        <div className="pend-info">
+                          <span className="pend-que">
+                            <b>{p.proyecto}</b>
+                            {" · "}
+                            {p.tipo === "debate_a_medias" ? "debate a medias"
+                              : p.tipo === "decisiones" ? `${p.cuantas} decisión(es) sin resolver`
+                              : p.tipo === "ejecucion" ? "ejecución sin cerrar"
+                              : "rama sin fusionar"}
+                          </span>
+                          <span className="pend-detalle">
+                            {p.tema ? p.tema.slice(0, 90) : p.rama}
+                          </span>
+                        </div>
+                        {p.transcript ? (
+                          <button className="pend-ir" onClick={() => atender(p)}>
+                            {p.tipo === "debate_a_medias" ? "Reanudar" : "Resolver"}
+                          </button>
+                        ) : (
+                          <span className="pend-nota" title={p.detalle}>
+                            {p.tipo === "ejecucion" ? "revisa el diff" : "merge manual"}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="nada-pendiente"><Check size={15} /> Nada espera tu decisión.</p>
+              )}
+
+              <h4 className="sub-global">
+                <FileText size={14} /> Historial ({indexados.length})
+                <button className="reindexar" onClick={reindexar}
+                  title="Reconstruye el índice desde los transcripts de los repos servidos">
+                  <RefreshCw size={12} /> reindexar
+                </button>
+              </h4>
+              <ul className="lista-indexados">
+                {indexados.map((d) => (
+                  <li key={d.transcript} className={d.accionable ? "" : "ajeno"}>
+                    <span className="ix-fecha">{d.fecha.slice(4, 6)}-{d.fecha.slice(6, 8)}</span>
+                    <span className="ix-proyecto">{d.proyecto}</span>
+                    <span className="ix-tema" title={d.tema}>
+                      {d.tema.split("DECISIONES YA TOMADAS")[0].slice(0, 80)}
+                    </span>
+                    <span className="ix-estado">
+                      {d.parcial ? "a medias"
+                        : d.decisiones_abiertas ? `${d.decisiones_abiertas} decisión(es)`
+                        : d.convergio ? "convergido" : "sin acuerdo"}
+                    </span>
+                    <span className="ix-costo">
+                      {d.coste != null ? `$${d.coste.toFixed(2)}` : "—"}
+                    </span>
+                    {d.accionable ? (
+                      <button className="ix-abrir"
+                        onClick={() => atender({
+                          tipo: "decisiones", repo_id: d.repo_id!, proyecto: d.proyecto,
+                          detalle: "", transcript: d.transcript.split("/").pop()!,
+                        })}>abrir</button>
+                    ) : (
+                      <span className="ix-nota" title={
+                        d.existe ? "Este Hub no sirve ese repositorio"
+                                 : "El transcript ya no está en disco"}>
+                        {d.existe ? "no servido" : "borrado"}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <p className="global-pie">
+                ${indexados.reduce((s, d) => s + (d.coste ?? 0), 0).toFixed(2)} en total ·
+                los debates de repos no servidos se ven pero no se operan
+                (se registran al arrancar el Hub con <code>--repo</code>).
+              </p>
+            </div>
+          )}
+
+          {items.length === 0 && !pendiente && !fin && !vistaGlobal && (
             <div className="vacio-feed">
               <Swords size={40} />
               <p>La arena está lista. Plantea un tema y lanza el debate.</p>

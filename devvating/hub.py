@@ -43,7 +43,7 @@ except ImportError as exc:  # pragma: no cover - guard de instalación
     ) from exc
 
 from . import agentes as banco
-from . import gitutil, reporte, roles, rotation
+from . import gitutil, registro, reporte, roles, rotation
 from .config import Config
 from .debate import _load_partial_session, _save_transcript
 from .executor import (
@@ -680,6 +680,95 @@ def crear_app(
             daemon=True,
         ).start()
         return {"ok": True}
+
+    def _repo_id_de_ruta(ruta: str) -> str | None:
+        """`repo_id` del roster para una ruta absoluta, o None si no se sirve.
+
+        El índice global abarca TODA la máquina, incluidos repos que este Hub
+        no tiene registrados. Sus debates se muestran igual —es la vista
+        global que se pidió— pero sin acciones: no se opera sobre lo que no
+        está en la lista blanca (D9/D12).
+        """
+        objetivo = os.path.abspath(ruta)
+        for rid, r in app.state.repos.items():
+            if os.path.abspath(r) == objetivo:
+                return rid
+        return None
+
+    @app.get("/api/historial")
+    def historial_global(limite: int = 40) -> dict:
+        """Todo lo debatido en esta máquina (D13), no solo en los repos servidos."""
+        filas = registro.listar(limite=limite)
+        for f in filas:
+            f["repo_id"] = _repo_id_de_ruta(f["repo"])
+            f["proyecto"] = os.path.basename(f["repo"])
+            # Accionable = está en el roster Y su transcript sigue en disco.
+            f["accionable"] = bool(f["repo_id"]) and f["existe"]
+        return {
+            "debates": filas,
+            "coste_total": round(sum(f["coste"] or 0 for f in filas), 4),
+            "db": registro.ruta_db(),
+        }
+
+    @app.post("/api/historial/reindexar", dependencies=[_csrf])
+    def reindexar_historial() -> dict:
+        """Reconstruye el índice desde los transcripts de los repos servidos.
+
+        Solo recorre el roster: reindexar una ruta cualquiera del disco sería
+        justo lo que D9 impide. Para incluir otro proyecto, se registra al
+        arrancar el Hub.
+        """
+        indexados, saltados = registro.reindexar(list(app.state.repos.values()))
+        return {"ok": True, "indexados": indexados, "saltados": saltados}
+
+    @app.get("/api/pendientes")
+    def pendientes() -> dict:
+        """Todo lo que espera una decisión tuya, junto y accionable.
+
+        Reúne en una sola lista lo que hasta ahora había que ir a buscar a
+        sitios distintos (o a la consola): debates cortados a medias,
+        decisiones cruciales sin resolver, ejecuciones esperando commit y
+        ramas con trabajo que nadie fusionó.
+        """
+        items: list[dict] = []
+
+        for f in registro.listar(limite=200):
+            rid = _repo_id_de_ruta(f["repo"])
+            if not rid or not f["existe"]:
+                continue  # no servido o borrado: no hay acción que ofrecer
+            base = {
+                "repo_id": rid, "proyecto": os.path.basename(f["repo"]),
+                "transcript": os.path.basename(f["transcript"]),
+                "tema": f["tema"], "fecha": f["fecha"],
+            }
+            if f["parcial"]:
+                items.append({**base, "tipo": "debate_a_medias",
+                              "detalle": "quedó cortado; se puede reanudar"})
+            elif f["decisiones_abiertas"]:
+                items.append({**base, "tipo": "decisiones",
+                              "cuantas": f["decisiones_abiertas"],
+                              "detalle": f"{f['decisiones_abiertas']} decisión(es) "
+                                         "crucial(es) sin resolver"})
+
+        for rid, ruta in app.state.repos.items():
+            proyecto = os.path.basename(ruta)
+            ue = app.state.ejecuciones.get(rid)
+            if ue:
+                items.append({
+                    "tipo": "ejecucion", "repo_id": rid, "proyecto": proyecto,
+                    "rama": ue["rama"],
+                    "detalle": "cambios en staging esperando commit o descarte",
+                })
+            if not gitutil.is_git_repo(ruta):
+                continue
+            for rama in gitutil.ramas_sin_fusionar(ruta):
+                items.append({
+                    "tipo": "rama_sin_fusionar", "repo_id": rid,
+                    "proyecto": proyecto, "rama": rama,
+                    "detalle": "tiene trabajo que no está en tu rama actual",
+                })
+
+        return {"pendientes": items, "total": len(items)}
 
     @app.get("/api/ejecucion-pendiente")
     def ejecucion_pendiente(repo_id: str | None = None) -> dict:

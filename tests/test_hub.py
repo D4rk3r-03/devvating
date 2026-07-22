@@ -1144,3 +1144,121 @@ class TestMultiRepo:
         with TestClient(app) as c:
             assert c.get("/api/transcripts").json() == {"transcripts": []}
             assert len(app.state.repos) == 1
+
+
+class TestHistorialYPendientes:
+    """Bloque 1 de la web: ver el índice global y lo que espera decisión del
+    vocero sin bajar a la consola."""
+
+    @pytest.fixture
+    def hub_con_datos(self, git_repo, tmp_path, monkeypatch):
+        from devvating import registro
+
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        monkeypatch.setenv("DEVVATING_REGISTRO_DIR", str(tmp_path / "reg"))
+        ts = git_repo / "transcripts"
+        ts.mkdir(exist_ok=True)
+
+        def escribir(nombre, **campos):
+            base = {"topic": {"prompt": "tema " + nombre}, "turns": [],
+                    "converged": True, "synthesizer": "claude", "decisiones": [],
+                    "usage_totals": {"total": {"cost_usd": 0.5}}}
+            base.update(campos)
+            (ts / nombre).write_text(json.dumps(base, ensure_ascii=False), encoding="utf-8")
+
+        escribir("20260722-100000-cerrado.json")
+        escribir("20260722-110000-cortado.partial.json")
+        escribir("20260722-120000-decide.json", estado="pendiente_decision",
+                 decisiones=[{"id": "d1", "crucial": True, "resuelta": False},
+                             {"id": "d2", "crucial": True, "resuelta": False}])
+        # Un debate de OTRO repo, que este Hub no sirve.
+        ajeno = tmp_path / "ajeno" / "transcripts"
+        ajeno.mkdir(parents=True)
+        (ajeno / "20260722-090000-de-otro.json").write_text(
+            json.dumps({"topic": {"prompt": "de otro proyecto"}, "turns": [],
+                        "converged": True, "decisiones": []}), encoding="utf-8")
+        registro.reindexar([str(git_repo), str(tmp_path / "ajeno")])
+
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            yield c, app, git_repo
+
+    def test_historial_incluye_debates_de_repos_no_servidos(self, hub_con_datos):
+        c, _, _ = hub_con_datos
+        d = c.get("/api/historial").json()
+        temas = {x["tema"] for x in d["debates"]}
+        assert "de otro proyecto" in temas          # la vista es global
+        ajeno = next(x for x in d["debates"] if x["tema"] == "de otro proyecto")
+        assert ajeno["repo_id"] is None and ajeno["accionable"] is False
+        propio = next(x for x in d["debates"] if x["tema"].endswith("cerrado.json"))
+        assert propio["accionable"] is True
+
+    def test_historial_suma_el_coste(self, hub_con_datos):
+        c, _, _ = hub_con_datos
+        assert c.get("/api/historial").json()["coste_total"] == 1.5  # 3 × 0.5
+
+    def test_pendientes_reune_lo_que_espera_decision(self, hub_con_datos):
+        c, _, _ = hub_con_datos
+        items = c.get("/api/pendientes").json()["pendientes"]
+        tipos = [i["tipo"] for i in items]
+        assert "debate_a_medias" in tipos
+        assert "decisiones" in tipos
+        # El cerrado no espera nada, así que no aparece.
+        assert not any("cerrado" in i.get("transcript", "") for i in items)
+        dec = next(i for i in items if i["tipo"] == "decisiones")
+        assert dec["cuantas"] == 2 and dec["repo_id"]
+
+    def test_pendientes_ignora_los_repos_no_servidos(self, hub_con_datos):
+        # Sin repo_id no hay acción posible: mostrarlos como accionables sería
+        # ofrecer botones que no pueden funcionar.
+        c, _, _ = hub_con_datos
+        items = c.get("/api/pendientes").json()["pendientes"]
+        assert all(i["repo_id"] for i in items)
+
+    def test_una_ejecucion_pendiente_aparece(self, hub_con_datos, tmp_path):
+        from devvating.executor import ExecutionPlan, Executor
+
+        c, app, git_repo = hub_con_datos
+
+        class Backend:
+            name = "stub"
+
+            def run(self, prompt, cwd, allow_commands):
+                (Path(cwd) / "x.txt").write_text("y\n", encoding="utf-8")
+                return 0, "ok"
+
+        out = Executor(str(git_repo), Backend()).execute(
+            ExecutionPlan(text="p", title="demo"), branch="devvating/pend")
+        rid = next(iter(app.state.repos))
+        app.state.ejecuciones[rid] = {
+            "rama": out.branch, "base": "main", "repo": str(git_repo),
+            "worktree": out.worktree, "returncode": 0,
+        }
+        items = c.get("/api/pendientes").json()["pendientes"]
+        ejec = [i for i in items if i["tipo"] == "ejecucion"]
+        assert len(ejec) == 1 and ejec[0]["rama"] == "devvating/pend"
+
+    def test_rama_sin_fusionar_se_reporta(self, hub_con_datos, git_repo):
+        import subprocess
+
+        c, _, _ = hub_con_datos
+        subprocess.run(["git", "checkout", "-q", "-b", "devvating/con-trabajo"],
+                       cwd=git_repo, check=True)
+        (git_repo / "nuevo.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "trabajo"], cwd=git_repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=git_repo, check=True)
+        items = c.get("/api/pendientes").json()["pendientes"]
+        ramas = [i for i in items if i["tipo"] == "rama_sin_fusionar"]
+        assert any(r["rama"] == "devvating/con-trabajo" for r in ramas)
+
+    def test_reindexar_solo_recorre_los_repos_servidos(self, hub_con_datos):
+        c, _, _ = hub_con_datos
+        d = c.post("/api/historial/reindexar").json()
+        assert d["ok"] and d["indexados"] == 3  # los del repo servido, no el ajeno
+
+    def test_reindexar_exige_csrf(self, hub_con_datos):
+        c, _, _ = hub_con_datos
+        r = c.post("/api/historial/reindexar", headers={"X-Devvating-CSRF": "no"})
+        assert r.status_code == 403

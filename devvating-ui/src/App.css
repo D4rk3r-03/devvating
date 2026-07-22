@@ -474,3 +474,80 @@ pre.diff .hunk { color: var(--accent); }
   margin-top: .3rem; font-size: .68rem; color: var(--text-muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* --- Vista global: historial de todos los proyectos y lo que te espera --- */
+.btn-global {
+  display: inline-flex; align-items: center; gap: .35rem;
+  padding: .2rem .6rem; margin-left: .8rem; font-size: .74rem; cursor: pointer;
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border-color); border-radius: 999px;
+}
+.btn-global:hover { color: var(--text-main); border-color: var(--text-muted); }
+.btn-global.con-pendientes {
+  color: var(--warning); border-color: color-mix(in srgb, var(--warning) 50%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+.panel-global { padding: 1.2rem 1.4rem; }
+.panel-global h3 { display: flex; align-items: center; gap: .5rem; font-size: .95rem; }
+.sub-global {
+  display: flex; align-items: center; gap: .4rem; margin: 1.2rem 0 .6rem;
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--text-muted);
+}
+.reindexar {
+  margin-left: auto; display: inline-flex; align-items: center; gap: .25rem;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text-muted); font-size: .68rem; text-transform: none;
+}
+.reindexar:hover { color: var(--text-main); }
+.nada-pendiente {
+  display: flex; align-items: center; gap: .4rem;
+  color: var(--success); font-size: .84rem;
+}
+
+.lista-pendientes, .lista-indexados { list-style: none; font-size: .8rem; }
+.lista-pendientes li {
+  display: flex; align-items: center; gap: .7rem; padding: .5rem .6rem;
+  border-left: 3px solid var(--warning); border-radius: 6px;
+  background: color-mix(in srgb, var(--warning) 7%, transparent);
+  margin-bottom: .4rem;
+}
+.lista-pendientes li.pend-ejecucion { border-left-color: var(--info); }
+.lista-pendientes li.pend-rama_sin_fusionar { border-left-color: var(--text-muted); }
+.pend-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pend-que { color: var(--text-main); }
+.pend-detalle {
+  color: var(--text-muted); font-size: .74rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pend-ir {
+  flex-shrink: 0; padding: .3rem .7rem; cursor: pointer; font-size: .75rem;
+  background: var(--primary); color: #fff; border: none; border-radius: 6px;
+}
+.pend-ir:hover { filter: brightness(1.15); }
+.pend-nota { flex-shrink: 0; color: var(--text-muted); font-size: .72rem; }
+
+.lista-indexados { max-height: 46vh; overflow-y: auto; }
+.lista-indexados li {
+  display: flex; align-items: center; gap: .7rem; padding: .35rem .3rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 40%, transparent);
+}
+.lista-indexados li.ajeno { opacity: .5; }
+.ix-fecha { color: var(--text-muted); font-size: .72rem; width: 3rem; flex-shrink: 0; }
+.ix-proyecto { color: var(--info); width: 8rem; flex-shrink: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ix-tema { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; color: var(--text-main); }
+.ix-estado { color: var(--text-muted); font-size: .73rem; width: 7.5rem;
+  flex-shrink: 0; text-align: right; }
+.ix-costo { color: var(--text-muted); font-size: .73rem; width: 3.2rem;
+  flex-shrink: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.ix-abrir {
+  flex-shrink: 0; padding: .2rem .55rem; cursor: pointer; font-size: .72rem;
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border-color); border-radius: 6px;
+}
+.ix-abrir:hover { color: var(--text-main); border-color: var(--text-muted); }
+.ix-nota { flex-shrink: 0; color: var(--text-muted); font-size: .7rem; width: 5rem;
+  text-align: right; }
+.global-pie { margin-top: .9rem; color: var(--text-muted); font-size: .74rem; }

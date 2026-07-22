@@ -279,6 +279,19 @@ def list_branches(repo: str, prefix: str = "devvating/") -> list[dict]:
     return ramas
 
 
+def ramas_sin_fusionar(repo: str, prefix: str = "devvating/") -> list[str]:
+    """Ramas de ejecución cuyo trabajo aún no está en la rama actual.
+
+    Es lo que queda pendiente de tu decisión tras commitear en la rama: el
+    merge a la rama de trabajo sigue siendo manual, así que estas son las que
+    tienen algo que nadie ha recogido.
+    """
+    # `--format` va ANTES de `--no-merged`: al revés, git lo toma como el
+    # commit opcional de esa opción y aborta con "nombre de objeto mal formado".
+    out = _run(["branch", "--format=%(refname:short)", "--no-merged"], repo).stdout
+    return [l.strip() for l in out.splitlines() if l.strip().startswith(prefix)]
+
+
 def discard_worktree(repo: str, worktree_path: str, branch: str) -> None:
     """Descarta una ejecución aislada: quita el worktree y borra su rama.
 
