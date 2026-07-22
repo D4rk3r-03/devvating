@@ -6,6 +6,7 @@ Se prueban contra binarios falsos (scripts bash en tmp) — sin CLIs reales.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 
@@ -338,3 +339,34 @@ class TestTurnoVacio:
         binario = fake_bin("ok", 'echo "mi postura"')
         out = GeminiCliAdapter(binary=binario, cwd=str(tmp_path)).converse("S", "P", REG)
         assert out == "mi postura"
+
+
+class TestAntigravityArgv:
+    """agy IGNORA el cwd del subprocess: sin --add-dir trabaja en su scratch y
+    responde desde memoria en vez de leer el repo del debate (verificado en
+    real: describía OTRO proyecto). El flag sostiene el anclaje al código."""
+
+    def test_ancla_el_repo_con_add_dir(self, tmp_path):
+        from devvating.adapters.cli import AntigravityCliAdapter
+
+        argv = AntigravityCliAdapter(cwd=str(tmp_path)).build_argv("SYS", "PROMPT")
+        i = argv.index("--add-dir")
+        assert argv[i + 1] == str(tmp_path)
+
+    def test_add_dir_es_ruta_absoluta(self, monkeypatch, tmp_path):
+        # El subprocess hereda cwd, pero agy resuelve rutas contra SU scratch:
+        # una relativa apuntaría a un directorio que no existe para él.
+        from devvating.adapters.cli import AntigravityCliAdapter
+
+        monkeypatch.chdir(tmp_path)
+        argv = AntigravityCliAdapter(cwd=".").build_argv("SYS", "PROMPT")
+        i = argv.index("--add-dir")
+        assert argv[i + 1] == str(tmp_path)
+        assert os.path.isabs(argv[i + 1])
+
+    def test_conserva_print_timeout_acorde_al_timeout(self, tmp_path):
+        from devvating.adapters.cli import AntigravityCliAdapter
+
+        argv = AntigravityCliAdapter(cwd=str(tmp_path), timeout=600).build_argv("S", "P")
+        i = argv.index("--print-timeout")
+        assert argv[i + 1] == "540s"

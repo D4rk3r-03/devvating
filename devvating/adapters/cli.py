@@ -419,6 +419,12 @@ class AntigravityCliAdapter(PlainCliAdapter):
 
     Sin `model` usa el default configurado en el propio agy (p. ej.
     "Gemini 3.1 Pro (High)") — el motivo de su entrada al roster (D7).
+
+    OJO (verificado en real): agy IGNORA el cwd del subprocess y trabaja en su
+    propio scratch (`~/.gemini/antigravity-cli/scratch`). Sin `--add-dir` no ve
+    el repositorio del debate: respondía desde memoria de conversaciones
+    previas —a veces sobre OTRO proyecto— aparentando estar anclado al código.
+    Es el flag que sostiene la premisa del proyecto: debatir sobre el repo real.
     """
 
     def __init__(
@@ -431,7 +437,8 @@ class AntigravityCliAdapter(PlainCliAdapter):
         # Los modelos Pro en tareas ancladas a código real pueden tardar >10
         # min por turno (verificado en real). El --print-timeout interno de
         # agy (default 5m) debe acompañar al timeout del subprocess.
-        extra = ["--print-timeout", f"{max(60, timeout - 60)}s"]
+        extra = ["--print-timeout", f"{max(60, timeout - 60)}s",
+                 "--add-dir", os.path.abspath(cwd)]
         if model:
             extra += ["--model", model]
         super().__init__("antigravity", binary, cwd, timeout, extra)
