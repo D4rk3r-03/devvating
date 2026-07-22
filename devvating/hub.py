@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import glob
+import hashlib
 import json
 import os
 import queue
@@ -312,12 +314,20 @@ def crear_app(
     fabrica_par: Callable = banco.par,
     backend_ejecucion=None,
     repos: list[str] | dict[str, str] | None = None,
+    raices: list[str] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Devvating Hub")
     # Repos servibles (fase B). Con uno solo el comportamiento es idéntico al
     # de antes: quien no mande `repo_id` opera sobre el primero.
     app.state.repos = _roster_de_repos(repo, repos)
     repo_default = next(iter(app.state.repos))
+    # Raíces donde el Hub puede DESCUBRIR proyectos (D15). Se declaran al
+    # arrancar: es lo único que sigue exigiendo consola, y una sola vez.
+    # Vacío = sin descubrimiento, exactamente el comportamiento anterior.
+    app.state.raices = [os.path.abspath(r) for r in (raices or [])]
+    # cand_id → ruta, poblada por el escaneo. Único puente entre lo que el
+    # navegador puede nombrar y el disco.
+    app.state.candidatos = {}
     app.state.historial = []          # eventos del debate en curso/último
     app.state.clientes = set()        # websockets conectados
     app.state.corriendo = False
@@ -480,6 +490,9 @@ def crear_app(
                 {"id": rid, "ruta": ruta} for rid, ruta in app.state.repos.items()
             ],
             "repo_default": repo_default,
+            # Con raíces declaradas, el front ofrece explorar y registrar
+            # proyectos sin volver a la consola.
+            "raices": list(app.state.raices),
         }
 
     @app.get("/api/estado")
@@ -694,6 +707,153 @@ def crear_app(
             if os.path.abspath(r) == objetivo:
                 return rid
         return None
+
+    def _cand_id(ruta: str) -> str:
+        """Identificador opaco de un directorio candidato.
+
+        Determinista (hash de la ruta) para que sobreviva a reescaneos, pero
+        eso NO es lo que lo hace seguro: la seguridad está en que la tabla
+        `app.state.candidatos` solo contiene rutas que el servidor descubrió y
+        validó bajo una raíz declarada. Adivinar el hash de `/etc` no sirve de
+        nada porque `/etc` nunca entró en la tabla.
+        """
+        return hashlib.sha256(os.path.abspath(ruta).encode()).hexdigest()[:16]
+
+    def _bajo_alguna_raiz(ruta: str) -> bool:
+        """True si `ruta` está realmente dentro de una raíz declarada.
+
+        Con `realpath` en ambos lados y `commonpath`: así un symlink dentro del
+        workspace que apunte fuera no pasa el filtro (D9 sigue en pie aunque
+        ahora el Hub descubra directorios).
+        """
+        real = os.path.realpath(ruta)
+        for raiz in app.state.raices:
+            r = os.path.realpath(raiz)
+            try:
+                if os.path.commonpath([real, r]) == r:
+                    return True
+            except ValueError:      # unidades distintas: no comparables
+                continue
+        return False
+
+    def _escanear_candidatos() -> list[dict]:
+        """Directorios bajo las raíces declaradas, hasta 2 niveles.
+
+        Dos niveles porque los proyectos cuelgan de la raíz o de una carpeta
+        temática (`TRABAJO/CLIENTE/proyecto`). Rellena la tabla que traduce
+        `cand_id` → ruta, único puente entre el navegador y el disco.
+        """
+        vistos: dict[str, dict] = {}
+        for raiz in app.state.raices:
+            base = os.path.realpath(raiz)
+            if not os.path.isdir(base):
+                continue
+            for nivel in (1, 2):
+                patron = os.path.join(base, *(["*"] * nivel))
+                for ruta in sorted(glob.glob(patron)):
+                    if not os.path.isdir(ruta) or os.path.basename(ruta).startswith("."):
+                        continue
+                    real = os.path.realpath(ruta)
+                    if not _bajo_alguna_raiz(real) or real in vistos:
+                        continue
+                    # No descender dentro de un REPOSITORIO ya visto: sus
+                    # carpetas internas no son proyectos (verificado en real:
+                    # aparecían docs/, tests/, src/ de cada repositorio). Sí se
+                    # desciende bajo una carpeta contenedora sin git, que es
+                    # como cuelgan muchos proyectos (TRABAJO/CLIENTE/proyecto).
+                    if any(real.startswith(v + os.sep) and datos["es_repo"]
+                           for v, datos in vistos.items()):
+                        continue
+                    es_repo = gitutil.es_raiz_de_repo(real)
+                    vistos[real] = {
+                        "cand_id": _cand_id(real),
+                        "nombre": os.path.basename(real),
+                        "ruta": real,
+                        "es_repo": es_repo,
+                        "tiene_commits": gitutil.tiene_commits(real) if es_repo else False,
+                        "registrado": any(
+                            os.path.abspath(r) == real for r in app.state.repos.values()
+                        ),
+                    }
+        app.state.candidatos = {c["cand_id"]: c["ruta"] for c in vistos.values()}
+        # Lo listo para usar primero: repos con commits sin registrar, luego lo
+        # que necesita `git init`, y al final lo que ya se sirve.
+        def orden(c: dict) -> tuple:
+            if c["registrado"]:
+                return (3, c["nombre"].lower())
+            if c["es_repo"] and c["tiene_commits"]:
+                return (0, c["nombre"].lower())
+            return (1 if c["es_repo"] else 2, c["nombre"].lower())
+
+        return sorted(vistos.values(), key=orden)
+
+    def _ruta_candidata(cand_id: str) -> str:
+        """Traduce un `cand_id` a su ruta. 404 si no está en la tabla.
+
+        Misma forma que `_ruta_repo`: el cliente no describe una ubicación,
+        elige una que el servidor ya validó.
+        """
+        ruta = app.state.candidatos.get(str(cand_id))
+        if ruta is None:
+            raise HTTPException(
+                404, "Candidato desconocido. Vuelve a explorar: los ids salen "
+                     "del escaneo del servidor, no se construyen a mano.")
+        if not _bajo_alguna_raiz(ruta):   # cinturón y tirantes ante un symlink nuevo
+            raise HTTPException(403, "Esa ruta ya no está bajo ninguna raíz declarada.")
+        return ruta
+
+    @app.get("/api/candidatos")
+    def candidatos() -> dict:
+        """Proyectos que se pueden registrar, descubiertos bajo `--raiz`."""
+        if not app.state.raices:
+            return {"candidatos": [], "raices": [], "aviso":
+                    "Arranca el Hub con --raiz <directorio> para poder explorar "
+                    "y registrar proyectos desde aquí."}
+        return {"candidatos": _escanear_candidatos(),
+                "raices": list(app.state.raices)}
+
+    @app.post("/api/repos", dependencies=[_csrf])
+    def registrar_repo(cuerpo: dict) -> dict:
+        """Da de alta un repositorio en caliente, por `cand_id`.
+
+        El cuerpo nunca trae una ruta: trae un id de la tabla que el servidor
+        construyó al escanear bajo las raíces declaradas (D9 intacta).
+        """
+        ruta = _ruta_candidata(str(cuerpo.get("cand_id", "")))
+        if not gitutil.is_git_repo(ruta):
+            raise HTTPException(
+                422, f"'{os.path.basename(ruta)}' aún no es un repositorio git. "
+                     "Inicialízalo primero (POST /api/repos/init).")
+        for rid, r in app.state.repos.items():
+            if os.path.abspath(r) == os.path.abspath(ruta):
+                return {"ok": True, "repo_id": rid, "ya_estaba": True}
+        rid = id_de_repo(ruta)
+        n = 2
+        while rid in app.state.repos:
+            rid, n = f"{id_de_repo(ruta)}-{n}", n + 1
+        app.state.repos[rid] = os.path.abspath(ruta)
+        registro.reindexar([ruta])   # sus debates entran al índice global
+        return {"ok": True, "repo_id": rid, "ruta": ruta, "ya_estaba": False}
+
+    @app.post("/api/repos/init", dependencies=[_csrf])
+    def init_repo(cuerpo: dict) -> dict:
+        """`git init` + commit inicial en un candidato, y lo registra.
+
+        Las guardas de contenido viven en `gitutil.init_inicial` (no vacío, no
+        anidado, y rechazo si hay secretos sin `.gitignore`); aquí solo se
+        añade el confinamiento a las raíces.
+        """
+        ruta = _ruta_candidata(str(cuerpo.get("cand_id", "")))
+        try:
+            sha = gitutil.init_inicial(ruta)
+        except RuntimeError as exc:
+            raise HTTPException(422, str(exc))
+        rid = id_de_repo(ruta)
+        n = 2
+        while rid in app.state.repos:
+            rid, n = f"{id_de_repo(ruta)}-{n}", n + 1
+        app.state.repos[rid] = os.path.abspath(ruta)
+        return {"ok": True, "repo_id": rid, "ruta": ruta, "sha": sha}
 
     @app.get("/api/historial")
     def historial_global(limite: int = 40) -> dict:
@@ -1065,15 +1225,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Raíz de un repo a servir. Repetible: --repo a --repo b. Los repos "
              "se dan de alta AQUÍ y nunca por HTTP (decisión D3 del vocero).",
     )
+    parser.add_argument(
+        "--raiz", action="append", default=None,
+        help="Directorio donde el Hub puede DESCUBRIR proyectos para "
+             "registrarlos desde la web (repetible). Escanea 2 niveles. Sin "
+             "esto no hay descubrimiento: solo se sirve lo dado con --repo.",
+    )
     args = parser.parse_args(argv)
 
     import uvicorn
 
     rutas = args.repo or ["."]
-    app = crear_app(repos=rutas)
+    app = crear_app(repos=rutas, raices=args.raiz)
     print(f"Devvating Hub → http://127.0.0.1:{args.port}")
     for rid, ruta in app.state.repos.items():
         print(f"  · {rid}: {ruta}")
+    for raiz in app.state.raices:
+        print(f"  ⌕ explora: {raiz}")
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 

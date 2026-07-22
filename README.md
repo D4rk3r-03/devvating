@@ -74,6 +74,9 @@ cd devvating-ui && npm install && npm run build && cd ..
 devvating hub          # → http://127.0.0.1:8777
 # Serve several projects at once (pick one from the UI):
 devvating hub --repo ~/work/api --repo ~/work/web
+# Or let the Hub discover projects under your workspaces and register
+# them (git init included) without leaving the browser:
+devvating hub --raiz ~/work --raiz ~/personal
 ```
 
 Every debate prints the synthesis (agreements / open disagreements / plan),

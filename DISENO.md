@@ -709,3 +709,45 @@ marcas de conflicto, sin `MERGE_HEAD`, repositorio limpio.
 
 Con esto la consola queda para: lanzar el Hub, publicar, y registrar repos o
 inicializarlos con git (bloque 3, pendiente de debate porque choca con D3/D9).
+
+### D15 — Descubrir y registrar proyectos desde la web (bloque 3, 2026-07-22)
+
+Último paso hacia "toda la gestión en el navegador". Debatido EN DEVVATING
+(transcript `20260722-155107-*`) y arbitrado por el vocero. **No hizo falta
+relajar D9**: el cuerpo de una petición sigue sin poder nombrar una ruta.
+
+- **Raíces declaradas al arrancar** (`devvating hub --raiz <dir>`, repetible).
+  Sin ellas no hay descubrimiento y el Hub se comporta como antes. Es lo único
+  que sigue exigiendo consola, y una sola vez — no por proyecto.
+- **`cand_id` opaco**: `GET /api/candidatos` escanea 2 niveles bajo las raíces
+  y devuelve ids que el servidor asocia a rutas en su memoria. El cliente elige
+  de esa tabla; un id ausente es 404, igual que `repo_id`. Confinamiento con
+  `realpath` + `commonpath`, así que un symlink dentro del workspace que
+  apunte fuera tampoco pasa.
+- **`POST /api/repos`** registra en caliente e indexa sus debates;
+  **`POST /api/repos/init`** hace `git init` + primer commit y registra.
+
+Guardas de `gitutil.init_inicial`, todas nacidas de objeciones del debate:
+
+1. **No sobre directorio vacío** — no hay nada que debatir, y commitear
+   exigiría inventar contenido del proyecto.
+2. **Ni sobre un repo, ni anidado en otro** — historias solapadas y worktrees
+   saliendo del árbol equivocado.
+3. **Rechaza si hay `.env`/`.venv`/`node_modules` sin `.gitignore`**, con un
+   error accionable. Verificado antes de implementarlo: un `add -A` ciego mete
+   el `.env` en el primer commit y `git show` recupera la clave, aunque después
+   se borre el archivo. NO se genera el `.gitignore`: decidir qué se versiona
+   en un proyecto ajeno es del vocero.
+
+Nota del debate: no convergió formalmente (claude votó "no" las dos rondas),
+pero sus tres objeciones están en el plan y su última réplica dice «con esa
+guarda dentro, compro el diseño completo». Otro caso del artefacto de las
+réplicas simultáneas — y esta vez el sintetizador (antigravity) declaró
+"ningún desacuerdo" sin señalar la contradicción, cosa que claude sí hizo
+cuando le tocó sintetizar en D11.
+
+Trampa hallada al probar con directorios reales: `is_git_repo` mira hacia
+arriba, así que cada carpeta interna de un repo (`docs/`, `src/`, `tests/`)
+aparecía como proyecto registrable. De ahí `gitutil.es_raiz_de_repo` y que el
+escaneo no descienda dentro de un repositorio ya visto — pero sí bajo una
+carpeta contenedora sin git, que es como cuelgan muchos proyectos.

@@ -74,6 +74,9 @@ cd devvating-ui && npm install && npm run build && cd ..
 devvating hub          # → http://127.0.0.1:8777
 # Varios proyectos a la vez (se eligen desde la interfaz):
 devvating hub --repo ~/trabajo/api --repo ~/trabajo/web
+# O deja que el Hub descubra proyectos bajo tus carpetas de trabajo y los
+# registre (git init incluido) sin salir del navegador:
+devvating hub --raiz ~/trabajo --raiz ~/personal
 ```
 
 Cada debate imprime la síntesis (acuerdos / desacuerdos abiertos / plan), un

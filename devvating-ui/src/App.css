@@ -558,3 +558,37 @@ pre.diff .hunk { color: var(--accent); }
 .rama-fusionar:hover {
   color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent);
 }
+
+/* Explorador de proyectos (D15): descubre bajo las raíces declaradas. */
+.explorar {
+  margin-left: auto; background: transparent; border: none; cursor: pointer;
+  color: var(--primary); font-size: .7rem; text-transform: none; letter-spacing: 0;
+}
+.explorar:hover { filter: brightness(1.2); }
+.lista-candidatos {
+  list-style: none; margin-top: .6rem; font-size: .76rem;
+  max-height: 30vh; overflow-y: auto;
+}
+.lista-candidatos li {
+  display: flex; align-items: center; gap: .5rem; padding: .35rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 40%, transparent);
+}
+.lista-candidatos li.ya { opacity: .55; }
+.cand-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.cand-nombre {
+  color: var(--text-main); font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cand-estado { color: var(--text-muted); font-size: .68rem; }
+.cand-add {
+  flex-shrink: 0; padding: .2rem .55rem; cursor: pointer; font-size: .7rem;
+  background: transparent; color: var(--primary);
+  border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  border-radius: 6px;
+}
+.cand-add:hover { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.cand-add.init { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.cand-add.init:hover { background: color-mix(in srgb, var(--warning) 12%, transparent); }
+.cand-check { color: var(--success); display: inline-flex; flex-shrink: 0; }
+.cand-nota { color: var(--text-muted); font-size: .68rem; flex-shrink: 0; }
+.lista-candidatos .vacio { color: var(--text-muted); font-style: italic; }

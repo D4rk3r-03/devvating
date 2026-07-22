@@ -47,6 +47,12 @@ type Worktree = { path: string; rama: string; existe: boolean; tiene_cambios: bo
 // en vivo, pero recuperable en cualquier momento: reiniciar el Hub ya no
 // cuesta perder el plan ni la posibilidad de aplicarlo.
 type RepoServido = { id: string; ruta: string };
+// Proyecto descubierto bajo una raíz declarada. `cand_id` es lo ÚNICO que el
+// front manda de vuelta: la ruta se muestra, nunca viaja al servidor (D9).
+type Candidato = {
+  cand_id: string; nombre: string; ruta: string;
+  es_repo: boolean; tiene_commits: boolean; registrado: boolean;
+};
 // Índice global (D13): abarca toda la máquina, así que un debate puede venir
 // de un repo que este Hub no sirve — se muestra, pero sin acciones.
 type DebateIndexado = {
@@ -250,6 +256,9 @@ export default function App() {
   const [repoId, setRepoId] = useState("");
   // Vista global: el índice de todo lo debatido y lo que espera tu decisión.
   // Son de toda la máquina, no del repo activo, así que van aparte.
+  const [candidatos, setCandidatos] = useState<Candidato[]>([]);
+  const [explorando, setExplorando] = useState(false);
+  const [hayRaices, setHayRaices] = useState(false);
   const [indexados, setIndexados] = useState<DebateIndexado[]>([]);
   const [pendientes, setPendientes] = useState<Pendiente[]>([]);
   const [vistaGlobal, setVistaGlobal] = useState(false);
@@ -354,6 +363,32 @@ export default function App() {
         setWorktrees(d.worktrees ?? []); setHuerfanos(d.huerfanos ?? []);
       });
 
+  const explorar = async () => {
+    setExplorando(true);
+    const d = await (await fetch("/api/candidatos")).json();
+    setCandidatos(d.candidatos ?? []);
+  };
+
+  // Registrar (o inicializar y registrar) un proyecto descubierto. Solo viaja
+  // el cand_id; la ruta la resuelve el servidor contra su propia tabla.
+  const anadirProyecto = async (c: Candidato, inicializar: boolean) => {
+    if (inicializar && !window.confirm(
+      `¿Inicializar git en ${c.nombre} y hacer su primer commit?\n\n` +
+      "Se rechazará si contiene .env, .venv o node_modules sin un .gitignore " +
+      "que los excluya, para no dejar secretos en la historia."
+    )) return;
+    const r = await post(inicializar ? "/api/repos/init" : "/api/repos",
+                         { cand_id: c.cand_id });
+    const d = await r.json();
+    if (!r.ok) { setAviso(d.detail ?? "No se pudo añadir el proyecto."); return; }
+    setAviso(d.ya_estaba ? `${c.nombre} ya estaba servido.`
+                         : `${c.nombre} añadido como "${d.repo_id}".`);
+    // Recargar el roster: el repo nuevo ya se puede elegir.
+    const roster = await (await fetch("/api/roster")).json();
+    setRepos(roster.repos ?? []);
+    explorar(); cargarGlobal();
+  };
+
   const cargarGlobal = () => {
     fetch("/api/historial").then((r) => r.json())
       .then((d) => setIndexados(d.debates ?? []));
@@ -435,6 +470,7 @@ export default function App() {
       setCsrfToken(d.csrf_token ?? "");
       setRepos(d.repos ?? []);
       setRepoId(d.repo_default ?? "");
+      setHayRaices((d.raices ?? []).length > 0);
     });
     cargarTranscripts();
     cargarRamas();
@@ -653,9 +689,17 @@ export default function App() {
         <div className="sidebar-scroll">
           {/* Selector de repo: solo aparece si el Hub sirve más de uno. Con uno
               solo la interfaz es idéntica a la de antes. */}
-          {repos.length > 1 && (
+          {(repos.length > 1 || hayRaices) && (
             <section className="sidebar-seccion">
-              <h2 className="titulo-lista"><Boxes size={13} /> Repositorio</h2>
+              <h2 className="titulo-lista">
+                <Boxes size={13} /> Repositorio
+                {hayRaices && (
+                  <button className="explorar" title="Buscar proyectos para añadir"
+                    onClick={() => { setExplorando(!explorando); if (!explorando) explorar(); }}>
+                    {explorando ? "cerrar" : "+ añadir"}
+                  </button>
+                )}
+              </h2>
               <select className="selector-repo" value={repoId} disabled={corriendo || ejecutando}
                 onChange={(e) => cambiarRepo(e.target.value)}
                 title={repos.find((r) => r.id === repoId)?.ruta}>
@@ -666,6 +710,40 @@ export default function App() {
               <p className="ruta-repo" title={repos.find((r) => r.id === repoId)?.ruta}>
                 {repos.find((r) => r.id === repoId)?.ruta}
               </p>
+
+              {explorando && (
+                <ul className="lista-candidatos">
+                  {candidatos.map((c) => (
+                    <li key={c.cand_id} className={c.registrado ? "ya" : ""}>
+                      <div className="cand-info">
+                        <span className="cand-nombre" title={c.ruta}>{c.nombre}</span>
+                        <span className="cand-estado">
+                          {c.registrado ? "ya servido"
+                            : c.es_repo && c.tiene_commits ? "repo listo"
+                            : c.es_repo ? "repo sin commits"
+                            : "sin git"}
+                        </span>
+                      </div>
+                      {c.registrado ? <span className="cand-check"><Check size={13} /></span>
+                        : c.es_repo && c.tiene_commits ? (
+                          <button className="cand-add" onClick={() => anadirProyecto(c, false)}>
+                            añadir
+                          </button>
+                        ) : !c.es_repo ? (
+                          <button className="cand-add init" onClick={() => anadirProyecto(c, true)}
+                            title="git init + primer commit, y lo añade">
+                            iniciar
+                          </button>
+                        ) : (
+                          <span className="cand-nota" title="Haz el primer commit para poder ejecutar planes">
+                            sin commits
+                          </span>
+                        )}
+                    </li>
+                  ))}
+                  {candidatos.length === 0 && <li className="vacio">nada bajo las raíces</li>}
+                </ul>
+              )}
             </section>
           )}
 

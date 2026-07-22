@@ -1368,3 +1368,158 @@ class TestFusionar:
         c, _, _ = repo_con_rama
         for ruta in ("/api/push", "/api/ramas/publicar", "/api/publicar"):
             assert c.post(ruta, json={}).status_code == 404
+
+
+class TestDescubrirYRegistrar:
+    """Bloque 3 (D15): registrar proyectos desde la web sin romper D9.
+
+    El navegador nunca nombra una ruta: elige un `cand_id` de la tabla que el
+    servidor construyó escaneando bajo las raíces declaradas al arrancar.
+    """
+
+    @pytest.fixture
+    def workspace(self, tmp_path, monkeypatch):
+        import subprocess
+
+        monkeypatch.setenv("DEVVATING_WORKTREE_DIR", str(tmp_path / "wt"))
+        monkeypatch.setenv("DEVVATING_REGISTRO_DIR", str(tmp_path / "reg"))
+        raiz = tmp_path / "workspace"
+        # Un repo ya hecho, a un nivel.
+        listo = raiz / "listo"
+        listo.mkdir(parents=True)
+        (listo / "a.txt").write_text("x\n", encoding="utf-8")
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                    ["config", "user.name", "T"], ["add", "-A"], ["commit", "-qm", "i"]):
+            subprocess.run(["git", *cmd], cwd=listo, check=True, capture_output=True)
+        # Un proyecto sin git, a DOS niveles (el caso DATADOG-TEAMS).
+        hondo = raiz / "cliente" / "sin-git"
+        hondo.mkdir(parents=True)
+        (hondo / "doc.md").write_text("material\n", encoding="utf-8")
+        # Fuera de la raíz: nunca debe aparecer.
+        fuera = tmp_path / "fuera" / "ajeno"
+        fuera.mkdir(parents=True)
+        (fuera / "x.txt").write_text("x\n", encoding="utf-8")
+
+        servido = tmp_path / "servido"
+        servido.mkdir()
+        app = crear_app(repos=[str(servido)], raices=[str(raiz)],
+                        fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            yield c, app, {"raiz": raiz, "listo": listo, "hondo": hondo, "fuera": fuera}
+
+    def _cand(self, c, nombre):
+        for x in c.get("/api/candidatos").json()["candidatos"]:
+            if x["nombre"] == nombre:
+                return x
+        return None
+
+    def test_descubre_hasta_dos_niveles_y_no_sale_de_la_raiz(self, workspace):
+        c, _, p = workspace
+        nombres = {x["nombre"] for x in c.get("/api/candidatos").json()["candidatos"]}
+        assert "listo" in nombres            # nivel 1
+        assert "sin-git" in nombres          # nivel 2
+        assert "ajeno" not in nombres        # fuera de la raíz
+
+    def test_reporta_si_ya_es_repo_y_si_tiene_commits(self, workspace):
+        c, _, _ = workspace
+        assert self._cand(c, "listo")["es_repo"] is True
+        assert self._cand(c, "listo")["tiene_commits"] is True
+        assert self._cand(c, "sin-git")["es_repo"] is False
+
+    def test_registra_por_cand_id_y_queda_servido(self, workspace):
+        c, app, _ = workspace
+        cand = self._cand(c, "listo")
+        r = c.post("/api/repos", json={"cand_id": cand["cand_id"]})
+        assert r.status_code == 200
+        rid = r.json()["repo_id"]
+        assert rid in app.state.repos
+        # Y ya se puede operar sobre él como cualquier otro.
+        assert c.get("/api/transcripts", params={"repo_id": rid}).status_code == 200
+
+    def test_registrar_dos_veces_no_duplica(self, workspace):
+        c, app, _ = workspace
+        cand = self._cand(c, "listo")
+        c.post("/api/repos", json={"cand_id": cand["cand_id"]})
+        n = len(app.state.repos)
+        r = c.post("/api/repos", json={"cand_id": cand["cand_id"]})
+        assert r.json()["ya_estaba"] is True and len(app.state.repos) == n
+
+    def test_una_ruta_como_cand_id_no_resuelve(self, workspace):
+        # El corazón de D9: el cuerpo no describe ubicaciones.
+        c, _, p = workspace
+        for intento in [str(p["fuera"]), str(p["listo"]), "/etc", "../fuera"]:
+            r = c.post("/api/repos", json={"cand_id": intento})
+            assert r.status_code == 404, f"{intento} no debería resolver"
+
+    def test_no_registra_lo_que_no_es_repo(self, workspace):
+        c, _, _ = workspace
+        r = c.post("/api/repos", json={"cand_id": self._cand(c, "sin-git")["cand_id"]})
+        assert r.status_code == 422 and "aún no es un repositorio" in r.json()["detail"]
+
+    def test_init_crea_repo_con_commit_y_lo_registra(self, workspace):
+        c, app, p = workspace
+        r = c.post("/api/repos/init", json={"cand_id": self._cand(c, "sin-git")["cand_id"]})
+        assert r.status_code == 200 and r.json()["sha"]
+        assert gitutil.is_git_repo(str(p["hondo"]))
+        assert gitutil.tiene_commits(str(p["hondo"]))   # el ejecutor lo exige
+        assert r.json()["repo_id"] in app.state.repos
+
+    def test_init_rechaza_secretos_sin_gitignore(self, workspace):
+        # La objeción verificada del debate: un `add -A` ciego deja el .env en
+        # la historia para siempre.
+        c, _, p = workspace
+        (p["hondo"] / ".env").write_text("ANTHROPIC_API_KEY=sk-real\n", encoding="utf-8")
+        r = c.post("/api/repos/init", json={"cand_id": self._cand(c, "sin-git")["cand_id"]})
+        assert r.status_code == 422
+        assert ".env" in r.json()["detail"] and ".gitignore" in r.json()["detail"]
+        assert not gitutil.is_git_repo(str(p["hondo"]))   # no se inicializó nada
+
+    def test_init_acepta_si_hay_gitignore(self, workspace):
+        c, _, p = workspace
+        (p["hondo"] / ".env").write_text("K=v\n", encoding="utf-8")
+        (p["hondo"] / ".gitignore").write_text(".env\n", encoding="utf-8")
+        r = c.post("/api/repos/init", json={"cand_id": self._cand(c, "sin-git")["cand_id"]})
+        assert r.status_code == 200
+        # Y el secreto NO entró en el commit.
+        assert ".env" not in gitutil._run(
+            ["show", "--name-only", "--format=", "HEAD"], str(p["hondo"])).stdout
+
+    def test_init_rechaza_directorio_vacio(self, workspace, tmp_path):
+        c, _, p = workspace
+        (p["raiz"] / "vacio").mkdir()
+        r = c.post("/api/repos/init", json={"cand_id": self._cand(c, "vacio")["cand_id"]})
+        assert r.status_code == 422 and "vacío" in r.json()["detail"]
+
+    def test_no_ofrece_las_carpetas_internas_de_un_repo(self, workspace):
+        # Verificado en real: sin este filtro salían docs/, tests/, src/… de
+        # cada repositorio como si fueran proyectos registrables.
+        c, _, p = workspace
+        (p["listo"] / "src").mkdir()
+        (p["listo"] / "src" / "x.py").write_text("x\n", encoding="utf-8")
+        assert self._cand(c, "src") is None
+
+    def test_init_rechaza_anidado_en_otro_repo(self, workspace):
+        # El escaneo ya no ofrece candidatos dentro de un repo, así que esta
+        # guarda se prueba en su nivel: es la defensa por si la ruta se vuelve
+        # anidada entre el escaneo y el init.
+        _, _, p = workspace
+        dentro = p["listo"] / "subproyecto"
+        dentro.mkdir()
+        (dentro / "x.txt").write_text("x\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="dentro de otro repositorio"):
+            gitutil.init_inicial(str(dentro))
+
+    def test_sin_raices_no_hay_descubrimiento(self, tmp_path):
+        # Comportamiento anterior intacto: sin --raiz, el Hub no explora nada.
+        app = crear_app(repo=str(tmp_path), fabrica_par=_fabrica_stub)
+        with TestClient(app) as c:
+            d = c.get("/api/candidatos").json()
+            assert d["candidatos"] == [] and "--raiz" in d["aviso"]
+
+    def test_registrar_exige_csrf(self, workspace):
+        c, _, _ = workspace
+        cand = self._cand(c, "listo")
+        r = c.post("/api/repos", json={"cand_id": cand["cand_id"]},
+                   headers={"X-Devvating-CSRF": "falso"})
+        assert r.status_code == 403

@@ -279,6 +279,96 @@ def list_branches(repo: str, prefix: str = "devvating/") -> list[dict]:
     return ramas
 
 
+# Rutas que casi nunca deben entrar en un commit: secretos y artefactos. Si
+# están presentes y no hay `.gitignore`, `init_inicial` se niega en vez de
+# commitearlas — el primer commit de un proyecto es para siempre aunque luego
+# se borre el archivo (verificado: un `add -A` ciego mete el .env con su clave
+# y `git show` la recupera).
+_IGNORABLES = (".env", ".venv", "venv", "node_modules", "__pycache__", ".direnv")
+
+
+def es_raiz_de_repo(ruta: str) -> bool:
+    """True si `ruta` es la RAÍZ de un repositorio, no solo algo dentro de uno.
+
+    `is_git_repo` busca hacia arriba, así que devuelve True para `<repo>/src`.
+    Para descubrir proyectos hace falta la distinción: si no, cada carpeta
+    interna de un repo aparece como un proyecto registrable (verificado en
+    real: salían `docs`, `tests`, `src`… de cada repositorio).
+    """
+    toplevel = _run(["rev-parse", "--show-toplevel"], ruta).stdout.strip()
+    return bool(toplevel) and os.path.realpath(toplevel) == os.path.realpath(ruta)
+
+
+def esta_anidado_en_repo(ruta: str) -> bool:
+    """True si algún ancestro de `ruta` ya es un repositorio git.
+
+    Inicializar dentro de otro repo crearía historias solapadas y los worktrees
+    de la ejecución saldrían del árbol equivocado.
+    """
+    actual = os.path.dirname(os.path.abspath(ruta))
+    while True:
+        if os.path.isdir(os.path.join(actual, ".git")):
+            return True
+        padre = os.path.dirname(actual)
+        if padre == actual:
+            return False
+        actual = padre
+
+
+def init_inicial(ruta: str, mensaje: str = "Estado inicial") -> str:
+    """`git init` + primer commit en un solo paso. Devuelve el sha corto.
+
+    Va junto a propósito: el ejecutor exige repo git CON al menos un commit
+    (`tiene_commits`), así que un `init` a secas dejaría el proyecto igual de
+    inservible para la fase 4.
+
+    Se niega —con un error accionable— antes que hacer algo dudoso:
+      - directorio vacío: no hay nada que debatir, y para commitear habría que
+        inventar contenido del proyecto;
+      - ya es repo, o está dentro de otro;
+      - contiene secretos/artefactos típicos sin un `.gitignore` que los
+        excluya. Aquí NO se genera el `.gitignore`: decidir qué se versiona en
+        un proyecto ajeno es del vocero, no del Hub.
+    """
+    ruta = os.path.abspath(ruta)
+    if not os.path.isdir(ruta):
+        raise RuntimeError(f"'{ruta}' no es un directorio.")
+    if os.path.isdir(os.path.join(ruta, ".git")):
+        raise RuntimeError(f"'{ruta}' ya es un repositorio git.")
+    if esta_anidado_en_repo(ruta):
+        raise RuntimeError(
+            f"'{ruta}' está dentro de otro repositorio git. Inicializarlo ahí "
+            "solaparía historias y la ejecución trabajaría sobre el árbol "
+            "equivocado."
+        )
+    contenido = [n for n in os.listdir(ruta) if not n.startswith(".git")]
+    if not contenido:
+        raise RuntimeError(
+            f"'{ruta}' está vacío: no hay nada que debatir ni que commitear. "
+            "Añade el material del proyecto y reintenta."
+        )
+    if not os.path.isfile(os.path.join(ruta, ".gitignore")):
+        presentes = [n for n in _IGNORABLES if os.path.exists(os.path.join(ruta, n))]
+        if presentes:
+            raise RuntimeError(
+                f"'{ruta}' contiene {', '.join(presentes)} y no tiene .gitignore. "
+                "El primer commit se los llevaría —y un secreto commiteado queda "
+                "en la historia aunque después borres el archivo—. Crea un "
+                ".gitignore que los excluya y reintenta."
+            )
+
+    r = _run(["init", "-q"], ruta)
+    if r.returncode != 0:
+        raise RuntimeError(f"No se pudo inicializar: {(r.stderr or r.stdout).strip()}")
+    stage_all(ruta)
+    if not staged_changed_files(ruta):
+        raise RuntimeError(
+            f"Tras `git add -A` no quedó nada por commitear en '{ruta}' "
+            "(¿todo su contenido está ignorado?)."
+        )
+    return commit(ruta, mensaje)
+
+
 def merge(repo: str, branch: str) -> str:
     """Fusiona `branch` en la rama actual. Devuelve el resumen de git.
 
