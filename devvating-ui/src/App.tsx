@@ -43,6 +43,13 @@ type Rama = { nombre: string; sha: string; fecha: string; asunto: string; actual
 // Worktree de ejecución que quedó colgando. `tiene_cambios` = trabajo sin
 // commitear que se perdería al retirarlo (la rama y sus commits, nunca).
 type Worktree = { path: string; rama: string; existe: boolean; tiene_cambios: boolean };
+// Un debate leído del disco (transcript). Lo mismo que el evento `fin` ofrece
+// en vivo, pero recuperable en cualquier momento: reiniciar el Hub ya no
+// cuesta perder el plan ni la posibilidad de aplicarlo.
+type Archivado = {
+  nombre: string; tema: string; sintesis: string; sintetizador: string;
+  convergio: boolean; decisiones: Decision[]; estado: string; parcial: boolean;
+};
 
 // ------------------------------------------------------------- helpers
 const escapeHtml = (s: string) =>
@@ -208,6 +215,11 @@ export default function App() {
   const [worktrees, setWorktrees] = useState<Worktree[]>([]);
   const [huerfanos, setHuerfanos] = useState<string[]>([]);
   const [aviso, setAviso] = useState("");
+  // Debate archivado que el vocero abrió del historial. El estado del debate
+  // EN CURSO vive en memoria del servidor y se pierde al reiniciarlo; esto lo
+  // recupera desde el transcript en disco, que es la fuente duradera.
+  const [archivado, setArchivado] = useState<Archivado | null>(null);
+  const [pendientesArchivado, setPendientesArchivado] = useState<string[]>([]);
 
   const [tema, setTema] = useState("");
   const [files, setFiles] = useState("");
@@ -254,6 +266,30 @@ export default function App() {
     const r = await post("/api/ramas/borrar", { rama: nombre });
     if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo borrar la rama.");
     cargarRamas();
+  };
+
+  // Abre un debate del historial con todas sus acciones vivas (ejecutar,
+  // resolver decisiones, cerrar plan, reanudar si quedó a medias).
+  const abrirArchivado = async (nombre: string) => {
+    const r = await fetch(`/api/transcripts/${encodeURIComponent(nombre)}`);
+    if (!r.ok) { setAviso("No se pudo leer el transcript."); return; }
+    const d = await r.json();
+    const decisiones: Decision[] = d.decisiones ?? [];
+    setArchivado({
+      nombre,
+      tema: d.topic?.prompt ?? "(sin tema)",
+      sintesis: d.synthesis ?? "",
+      sintetizador: d.synthesizer ?? "?",
+      convergio: !!d.converged,
+      decisiones,
+      estado: d.estado ?? "",
+      parcial: nombre.endsWith(".partial.json"),
+    });
+    // Mismo gate que en vivo: las decisiones cruciales sin resolver bloquean
+    // la ejecución. Se recalcula desde el disco, que ya guarda las resueltas.
+    setPendientesArchivado(
+      decisiones.filter((x) => x.crucial && !x.resuelta).map((x) => x.pregunta),
+    );
   };
 
   const cargarWorktrees = () =>
@@ -543,9 +579,16 @@ export default function App() {
             <h2 className="titulo-lista"><FileText size={14} /> Debates anteriores</h2>
             <ul className="lista-transcripts">
               {transcripts.map((t) => (
-                <li key={t}>
-                  <a href={`/api/transcripts/${encodeURIComponent(t)}/html`} target="_blank" rel="noreferrer"
-                    title={t}>{t.replace(/\.json$/, "").slice(16)}</a>
+                <li key={t} className={archivado?.nombre === t ? "abierto" : ""}>
+                  <button className="abrir-transcript" title={`Abrir ${t}`}
+                    onClick={() => abrirArchivado(t)}>
+                    {t.replace(/\.partial\.json$|\.json$/, "").slice(16)}
+                    {t.endsWith(".partial.json") && <span className="etiqueta-parcial">a medias</span>}
+                  </button>
+                  <a href={`/api/transcripts/${encodeURIComponent(t)}/html`} target="_blank"
+                    rel="noreferrer" className="ver-html" title="Abrir el reporte completo">
+                    <FileText size={12} />
+                  </a>
                 </li>
               ))}
               {transcripts.length === 0 && <li className="vacio">aún ninguno</li>}
@@ -721,6 +764,76 @@ export default function App() {
                 </>
               ) : (
                 <p>Lo detuviste antes de que hubiera turnos completados.</p>
+              )}
+            </div>
+          )}
+
+          {archivado && (
+            <div className="panel-sintesis glass-panel animate-fade-in archivado">
+              <h3>
+                <FileText size={16} /> Debate archivado
+                {!archivado.parcial && <> · síntesis por {archivado.sintetizador}</>}
+                {archivado.estado === "pendiente_decision" &&
+                  <span className="badge-estado" title="Tiene decisiones cruciales sin resolver.">
+                    decisión pendiente</span>}
+                <button className="cerrar-archivado" title="Cerrar"
+                  onClick={() => { setArchivado(null); setPendientesArchivado([]); }}>
+                  <Ban size={14} />
+                </button>
+              </h3>
+              <p className="tema-archivado">{archivado.tema}</p>
+
+              {archivado.parcial ? (
+                <p>Este debate quedó a medias. Puedes reanudarlo: los turnos ya
+                  pagados se reutilizan y solo corre lo que falta.</p>
+              ) : (
+                <div className="cuerpo" dangerouslySetInnerHTML={md(archivado.sintesis)} />
+              )}
+
+              {archivado.decisiones.length > 0 && (
+                <PanelDecisiones decisiones={archivado.decisiones} transcript={archivado.nombre}
+                  post={post} onResuelto={setPendientesArchivado} />
+              )}
+
+              <footer>
+                <a href={`/api/transcripts/${encodeURIComponent(archivado.nombre)}/html`}
+                  target="_blank" rel="noreferrer" className="ver-reporte">
+                  <FileText size={14} /> reporte completo
+                </a>
+                {archivado.parcial ? (
+                  <button className="ejecutar" disabled={corriendo}
+                    onClick={() => reanudar(archivado.nombre)}>
+                    <RotateCcw size={14} /> Reanudar debate
+                  </button>
+                ) : (
+                  <>
+                    {archivado.decisiones.length > 0 && (
+                      <button className="cerrar-plan" disabled={corriendo}
+                        onClick={() => cerrarPlan(archivado.nombre)}
+                        title="Re-sintetiza con tus decisiones ya fijadas para dejar un plan sin ambigüedades.">
+                        <ListChecks size={14} /> Cerrar plan
+                      </button>
+                    )}
+                    <button className="ejecutar"
+                      disabled={ejecutando || corriendo || pendientesArchivado.length > 0 || !archivado.sintesis}
+                      onClick={() => ejecutarPlan(archivado.nombre)}
+                      title={pendientesArchivado.length > 0
+                        ? "Resuelve las decisiones cruciales antes de ejecutar."
+                        : "Aplica el plan en una rama nueva; nada se commitea."}>
+                      <GitBranch size={14} /> {ejecutando ? "Ejecutando…" : "Ejecutar plan"}
+                    </button>
+                  </>
+                )}
+              </footer>
+              {pendientesArchivado.length > 0 && (
+                <p className="pista-gate">
+                  <TriangleAlert size={13} /> Faltan decisiones cruciales:{" "}
+                  {pendientesArchivado.join("; ")}.{" "}
+                  <button className="forzar-link"
+                    onClick={() => ejecutarPlan(archivado.nombre, true)}>
+                    forzar ejecución bajo mi riesgo
+                  </button>
+                </p>
               )}
             </div>
           )}

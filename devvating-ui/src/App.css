@@ -72,13 +72,38 @@
   list-style: none; max-height: 24vh; overflow-y: auto;
   font-size: .78rem;
 }
-.lista-transcripts li { margin-bottom: .35rem; }
+.lista-transcripts li {
+  margin-bottom: .35rem; display: flex; align-items: center; gap: .35rem;
+}
 .lista-transcripts a {
   color: var(--text-muted); text-decoration: none;
   display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .lista-transcripts a:hover { color: var(--text-main); }
 .lista-transcripts .vacio { color: var(--text-muted); font-style: italic; }
+
+/* Un debate archivado se ABRE con todas sus acciones vivas (ejecutar,
+   decidir, cerrar, reanudar); el icono lateral solo lleva al reporte HTML. */
+.abrir-transcript {
+  flex: 1; min-width: 0; text-align: left; cursor: pointer;
+  background: transparent; border: none; padding: 0;
+  color: var(--text-muted); font: inherit;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.abrir-transcript:hover { color: var(--text-main); }
+.lista-transcripts li.abierto .abrir-transcript { color: var(--info); font-weight: 600; }
+.ver-html { color: var(--text-muted); display: inline-flex; flex-shrink: 0; }
+.etiqueta-parcial {
+  margin-left: .4rem; padding: 0 .35rem; border-radius: 999px;
+  font-size: .62rem; background: rgba(245, 158, 11, .16); color: var(--warning);
+}
+.panel-sintesis.archivado { border-left: 3px solid var(--info); }
+.tema-archivado { color: var(--text-muted); font-size: .85rem; margin: -.2rem 0 .8rem; }
+.cerrar-archivado {
+  margin-left: auto; background: transparent; border: none; cursor: pointer;
+  color: var(--text-muted); display: inline-flex; padding: .2rem; border-radius: 6px;
+}
+.cerrar-archivado:hover { color: var(--danger); }
 
 /* --- Historial de ramas de ejecución ---------------------------------- */
 .lista-ramas {
