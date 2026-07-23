@@ -46,6 +46,9 @@ except ImportError as exc:  # pragma: no cover - guard de instalación
 
 from . import agentes as banco
 from . import gitutil, registro, reporte, roles, rotation
+from .appconfig import ProjectConfig
+from .auditor import bloquea as auditoria_bloquea
+from .auditor import crear_auditor
 from .config import Config
 from .debate import _load_partial_session, _save_transcript
 from .executor import (
@@ -227,7 +230,7 @@ def _debate_worker(
 
 
 def _ejecucion_worker(
-    config: dict, emitir: Callable[[dict], None], backend=None
+    config: dict, emitir: Callable[[dict], None], backend=None, auditor=None
 ) -> None:
     """Aplica un plan en un worktree aislado (fase 4) y emite el diff.
 
@@ -255,6 +258,7 @@ def _ejecucion_worker(
         )
         resultado = ejecutor.execute(
             plan, allow_commands=False,
+            auditor_backend=auditor,
             allow_open_decisions=config.get("forzar_decisiones", False),
         )
     except (ExecutorError, KeyError) as exc:
@@ -272,8 +276,11 @@ def _ejecucion_worker(
         "archivos": resultado.changed_files,
         "diff": resultado.diff,
         # Señal determinista plan↔diff: llega junto al diff, que es donde el
-        # vocero decide. No bloquea nada todavía (el auditor viene después).
+        # vocero decide. No bloquea (a diferencia del auditor).
         "correspondencia": resultado.correspondencia,
+        # Veredicto del auditor por modelo (vacío si no se pidió). "desviado"
+        # bloqueará el commit; el vocero puede forzar.
+        "auditoria": resultado.auditoria,
     })
     emitir({"tipo": "ejecucion_cerrada"})
 
@@ -316,6 +323,7 @@ def crear_app(
     repo: str = ".",
     fabrica_par: Callable = banco.par,
     backend_ejecucion=None,
+    auditor_ejecucion=None,
     repos: list[str] | dict[str, str] | None = None,
     raices: list[str] | None = None,
 ) -> FastAPI:
@@ -415,6 +423,9 @@ def crear_app(
                 "repo": ruta,
                 "worktree": w["path"],
                 "returncode": side.get("returncode"),  # None => no se ofrece commit
+                # El veredicto del auditor también sobrevive al reinicio: vive en
+                # el sidecar, así que un "desviado" sigue bloqueando el commit.
+                "auditoria": side.get("auditoria", {}),
             }
 
     @app.on_event("startup")
@@ -442,6 +453,9 @@ def crear_app(
                     "rama": msg["rama"], "base": msg.get("rama_base", ""),
                     "repo": msg["repo"], "worktree": msg.get("worktree", ""),
                     "returncode": msg.get("returncode", 0),
+                    # Veredicto del auditor: "desviado" bloquea el commit salvo
+                    # forzar. Vacío/ausente = no se auditó, no bloquea.
+                    "auditoria": msg.get("auditoria", {}),
                 }
             # Los deltas de streaming son transitorios (la vista final llega en
             # el evento *_fin con el texto ya despojado): se difunden a los
@@ -681,6 +695,28 @@ def crear_app(
         # blanca, nunca una ruta del disco (agujero de escritura remota vía
         # navegador — auto-auditoría D9, ampliada a multi-repo en la fase B).
         repo_objetivo = _ruta_repo(repo_id)
+        # Auditoría de fase 5 (D16): opt-in por ejecución (`auditar: true`), como
+        # `--verificar` en la CLI. El agente auditor sale de `.devvating.json` del
+        # repo OBJETIVO (no del cuerpo: el navegador no nombra al auditor, solo
+        # pide que se audite). Es read-only, así que —a diferencia de la
+        # verificación, que corre un comando del repo— no exige un ritual de
+        # confirmación aparte. Un `auditoria` mal configurado es error de config
+        # (422), no un fallback silencioso.
+        auditor = None
+        if bool(cuerpo.get("auditar")):
+            nombre_auditor = ProjectConfig.load(repo_objetivo).auditoria
+            if not nombre_auditor:
+                raise HTTPException(
+                    422,
+                    "Pediste auditar, pero '.devvating.json' del repo no trae "
+                    "'auditoria' (nombre del agente auditor).",
+                )
+            try:
+                # `auditor_ejecucion` inyecta un backend en tests; en real se
+                # resuelve el nombre del roster a un auditor read-only.
+                auditor = auditor_ejecucion or crear_auditor(nombre_auditor)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
         app.state.ejecutando = True
         _emitir({"tipo": "ejecucion_inicio", "transcript": nombre,
                  "repo": repo_objetivo, "repo_id": repo_id})
@@ -692,6 +728,7 @@ def crear_app(
                  "decisiones_pendientes": pendientes, "forzar_decisiones": forzar},
                 _emitir,
                 backend_ejecucion,
+                auditor,
             ),
             daemon=True,
         ).start()
@@ -958,6 +995,9 @@ def crear_app(
             "diff": gitutil.staged_diff(wt),
             # Del sidecar: se calculó al ejecutar y sobrevive al reinicio.
             "correspondencia": (gitutil.leer_sidecar(wt) or {}).get("correspondencia", {}),
+            # Veredicto del auditor: el front lo muestra y avisa si "desviado"
+            # (el commit está bloqueado salvo forzar).
+            "auditoria": ue.get("auditoria") or (gitutil.leer_sidecar(wt) or {}).get("auditoria", {}),
         }}
 
     @app.post("/api/commit", dependencies=[_csrf])
@@ -978,6 +1018,18 @@ def crear_app(
                 409,
                 f"La ejecución falló (código {ue['returncode']}): el plan no se "
                 "aplicó limpio. Revisa el diff y descarta; no se commitea un fallo.",
+            )
+        # Gate del auditor (D16): un veredicto "desviado" bloquea el commit por
+        # defecto. Escape explícito del vocero (`forzar: true`), no un silencio:
+        # el vocero revisó el diff y decide asumir el desvío. El fallback
+        # ("desconocido"/ausente) NO bloquea — es la política acordada.
+        auditoria = ue.get("auditoria") or {}
+        if auditoria_bloquea(auditoria) and not bool(cuerpo.get("forzar")):
+            raise HTTPException(
+                409,
+                "El auditor marcó la ejecución como DESVIADA del plan: "
+                + (auditoria.get("resumen") or "revisa el diff.")
+                + " Revisa y, si asumes el desvío, reenvía con forzar:true.",
             )
         mensaje = str(cuerpo.get("mensaje") or "").strip()
         if not mensaje:

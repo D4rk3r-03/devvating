@@ -22,7 +22,7 @@ type Msg =
   | { tipo: "intervencion_resuelta"; ronda: number; texto: string | null }
   | { tipo: "ejecucion_inicio"; transcript: string; repo: string }
   | { tipo: "ejecucion_evento"; evento: string; valor: string }
-  | { tipo: "ejecucion_fin"; rama: string; rama_base: string; returncode: number; archivos: string[]; diff: string; correspondencia?: Correspondencia }
+  | { tipo: "ejecucion_fin"; rama: string; rama_base: string; returncode: number; archivos: string[]; diff: string; correspondencia?: Correspondencia; auditoria?: Auditoria }
   | { tipo: "ejecucion_error"; mensaje: string }
   | { tipo: "commit_fin"; sha: string; rama: string }
   | { tipo: "descartar_fin"; base: string; rama: string }
@@ -50,6 +50,14 @@ type Worktree = { path: string; rama: string; existe: boolean; tiene_cambios: bo
 type Correspondencia = {
   tocados_no_previstos: string[]; previstos_no_tocados: string[]; sospechoso: boolean;
 };
+// Veredicto del auditor por modelo (D16). A diferencia de la correspondencia,
+// "desviado" BLOQUEA el commit (con escape del vocero: forzar).
+type Auditoria = {
+  veredicto: "conforme" | "desviado" | "desconocido";
+  no_pedido: { que: string; cita: string; cita_localizada?: boolean }[];
+  omitido: { que: string; cita: string }[];
+  resumen: string; agente: string; bloquea: boolean;
+};
 type RepoServido = { id: string; ruta: string };
 // Proyecto descubierto bajo una raíz declarada. `cand_id` es lo ÚNICO que el
 // front manda de vuelta: la ruta se muestra, nunca viaja al servidor (D9).
@@ -75,7 +83,7 @@ type Pendiente = {
 type Recuperada = {
   rama: string; rama_base: string; worktree: string;
   returncode: number | null; archivos: string[]; diff: string;
-  correspondencia?: Correspondencia;
+  correspondencia?: Correspondencia; auditoria?: Auditoria;
 };
 type Archivado = {
   nombre: string; tema: string; sintesis: string; sintetizador: string;
@@ -279,6 +287,9 @@ export default function App() {
   const [sesgoB, setSesgoB] = useState("cauto");
   const [nota, setNota] = useState("");
   const [ejecutando, setEjecutando] = useState(false);
+  // Opt-in de la auditoría de fase 5 (D16): el agente sale de .devvating.json;
+  // esto solo pide que corra en esta ejecución (como --auditar en la CLI).
+  const [auditar, setAuditar] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   // Preguntas de decisiones cruciales aún sin resolver: gatean "Ejecutar plan".
   const [decisionesPendientes, setDecisionesPendientes] = useState<string[]>([]);
@@ -511,7 +522,7 @@ export default function App() {
     let intervencion: { ronda: number } | null = null;
     let ejecucion:
       | { estado: "corriendo"; detalle: string }
-      | { estado: "fin"; rama: string; rama_base: string; archivos: string[]; diff: string; returncode: number; correspondencia?: Correspondencia }
+      | { estado: "fin"; rama: string; rama_base: string; archivos: string[]; diff: string; returncode: number; correspondencia?: Correspondencia; auditoria?: Auditoria }
       | { estado: "error"; mensaje: string }
       | null = null;
     let cierre:
@@ -537,7 +548,7 @@ export default function App() {
       else if (m.tipo === "ejecucion_evento")
         ejecucion = { estado: "corriendo", detalle: `${m.evento}: ${m.valor}` };
       else if (m.tipo === "ejecucion_fin")
-        ejecucion = { estado: "fin", rama: m.rama, rama_base: m.rama_base, archivos: m.archivos, diff: m.diff, returncode: m.returncode, correspondencia: m.correspondencia };
+        ejecucion = { estado: "fin", rama: m.rama, rama_base: m.rama_base, archivos: m.archivos, diff: m.diff, returncode: m.returncode, correspondencia: m.correspondencia, auditoria: m.auditoria };
       else if (m.tipo === "ejecucion_error")
         ejecucion = { estado: "error", mensaje: m.mensaje };
       else if (m.tipo === "commit_fin") cierre = { tipo: "commit", sha: m.sha, rama: m.rama };
@@ -585,6 +596,7 @@ export default function App() {
           returncode: recuperada.returncode ?? -1,
           desconocido: recuperada.returncode === null,
           correspondencia: recuperada.correspondencia,
+          auditoria: recuperada.auditoria,
         }
       : null
   );
@@ -644,15 +656,17 @@ export default function App() {
 
   const ejecutarPlan = async (transcript: string, forzar = false) => {
     setEjecutando(true);
-    const r = await post("/api/ejecutar", { transcript, forzar_decisiones: forzar });
+    const r = await post("/api/ejecutar", {
+      transcript, forzar_decisiones: forzar, auditar,
+    });
     if (!r.ok) {
       setEjecutando(false);
       setAviso((await r.json()).detail ?? "No se pudo lanzar la ejecución.");
     }
   };
 
-  const commitear = async () => {
-    const r = await post("/api/commit", { mensaje: commitMsg });
+  const commitear = async (forzar = false) => {
+    const r = await post("/api/commit", { mensaje: commitMsg, forzar });
     if (!r.ok) setAviso((await r.json()).detail ?? "No se pudo commitear.");
     else setCommitMsg("");
   };
@@ -1168,6 +1182,11 @@ export default function App() {
                         <ListChecks size={14} /> Cerrar plan
                       </button>
                     )}
+                    <label className="opt-auditar" title="Un agente auditor (read-only) revisa si el diff hace lo que el plan pidió; un veredicto 'desviado' bloquea el commit.">
+                      <input type="checkbox" checked={auditar}
+                        onChange={(e) => setAuditar(e.target.checked)}
+                        disabled={ejecutando || corriendo} /> auditar
+                    </label>
                     <button className="ejecutar"
                       disabled={ejecutando || corriendo || pendientesArchivado.length > 0 || !archivado.sintesis}
                       onClick={() => ejecutarPlan(archivado.nombre)}
@@ -1222,6 +1241,11 @@ export default function App() {
                     <ListChecks size={14} /> Cerrar plan
                   </button>
                 )}
+                <label className="opt-auditar" title="Un agente auditor (read-only) revisa si el diff hace lo que el plan pidió; un veredicto 'desviado' bloquea el commit.">
+                  <input type="checkbox" checked={auditar}
+                    onChange={(e) => setAuditar(e.target.checked)}
+                    disabled={ejecutando || corriendo} /> auditar
+                </label>
                 <button className="ejecutar"
                   disabled={ejecutando || corriendo || decisionesPendientes.length > 0}
                   onClick={() => ejecutarPlan(fin.transcript)}
@@ -1276,6 +1300,47 @@ export default function App() {
                       Puede ser legítimo — revisa el diff con eso en mente.
                     </p>
                   )}
+                  {/* Veredicto del auditor por modelo: "desviado" bloquea el
+                      commit (con escape); "conforme" tranquiliza; "desconocido"
+                      solo informa que no se pudo auditar. */}
+                  {"auditoria" in ejecucion && ejecucion.auditoria &&
+                   ejecucion.auditoria.veredicto === "desviado" && (
+                    <div className="aviso-auditoria desviado">
+                      <p>
+                        <TriangleAlert size={14} /> <b>El auditor marcó la ejecución
+                        como DESVIADA del plan.</b> {ejecucion.auditoria.resumen}
+                      </p>
+                      {ejecucion.auditoria.no_pedido.length > 0 && (
+                        <ul>{ejecucion.auditoria.no_pedido.map((h, i) => (
+                          <li key={`np-${i}`}>No pedido: {h.que}
+                            {h.cita_localizada === false &&
+                              <em> (cita no localizada en el diff)</em>}</li>
+                        ))}</ul>
+                      )}
+                      {ejecucion.auditoria.omitido.length > 0 && (
+                        <ul>{ejecucion.auditoria.omitido.map((h, i) => (
+                          <li key={`om-${i}`}>Omitido: {h.que}</li>
+                        ))}</ul>
+                      )}
+                      <p className="pista-cierre fallo">El commit está bloqueado;
+                        revisa el diff y, si asumes el desvío, usa «Commit asumiendo
+                        el desvío».</p>
+                    </div>
+                  )}
+                  {"auditoria" in ejecucion && ejecucion.auditoria &&
+                   ejecucion.auditoria.veredicto === "conforme" && (
+                    <p className="aviso-auditoria conforme">
+                      <Check size={14} /> El auditor confirma que el diff
+                      corresponde al plan.
+                    </p>
+                  )}
+                  {"auditoria" in ejecucion && ejecucion.auditoria &&
+                   ejecucion.auditoria.veredicto === "desconocido" && (
+                    <p className="aviso-auditoria">
+                      <TriangleAlert size={14} /> El auditor no emitió un veredicto
+                      legible: no se pudo auditar (no bloquea).
+                    </p>
+                  )}
                   {ejecucion.archivos.length === 0 ? (
                     <p>El ejecutor no produjo cambios.</p>
                   ) : (
@@ -1328,10 +1393,18 @@ export default function App() {
                           onChange={(e) => setCommitMsg(e.target.value)} />
                       </label>
                       <div className="fila-cierre">
-                        <button className="commit" onClick={commitear}
-                          disabled={!commitMsg.trim()}>
-                          <GitBranch size={14} /> Commit en la rama
-                        </button>
+                        {"auditoria" in ejecucion && ejecucion.auditoria?.veredicto === "desviado" ? (
+                          <button className="commit forzar" onClick={() => commitear(true)}
+                            disabled={!commitMsg.trim()}
+                            title="El auditor bloqueó el commit; asumes el desvío bajo tu criterio.">
+                            <GitBranch size={14} /> Commit asumiendo el desvío
+                          </button>
+                        ) : (
+                          <button className="commit" onClick={() => commitear()}
+                            disabled={!commitMsg.trim()}>
+                            <GitBranch size={14} /> Commit en la rama
+                          </button>
+                        )}
                         <button className="descartar" onClick={descartar}>
                           <Trash2 size={14} /> Descartar
                         </button>

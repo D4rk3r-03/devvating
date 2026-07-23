@@ -796,6 +796,147 @@ class TestEjecucion:
             assert r.status_code == 422
 
 
+_BLOQUE_DESVIADO = (
+    '{"auditoria":{"veredicto":"desviado","no_pedido":[{"que":"tocó otra cosa",'
+    '"cita":"«+mundo-hub»"}],"omitido":[],"resumen":"se desvió del plan"}}'
+)
+_BLOQUE_CONFORME = (
+    '{"auditoria":{"veredicto":"conforme","no_pedido":[],"omitido":[],'
+    '"resumen":"corresponde al plan"}}'
+)
+
+
+class _AuditorStub:
+    """Auditor read-only inyectable: emite un bloque fijo. run(prompt, cwd)."""
+
+    name = "stub-auditor"
+
+    def __init__(self, salida: str = _BLOQUE_DESVIADO) -> None:
+        self.salida = salida
+        self.invocado = False
+
+    def run(self, prompt, cwd):
+        self.invocado = True
+        return 0, self.salida
+
+
+class TestAuditorGate:
+    """D16: el auditor de fase 5 bloquea el commit ante veredicto 'desviado',
+    con escape del vocero (forzar). Opt-in por ejecución (`auditar`), agente en
+    'auditoria' de .devvating.json. Fallback (no config, JSON roto): no bloquea."""
+
+    @staticmethod
+    def _con_auditoria(repo, agente="claude"):
+        import subprocess
+
+        (repo / ".gitignore").write_text("transcripts/\n.devvating/\n", encoding="utf-8")
+        (repo / ".devvating.json").write_text(
+            json.dumps({"auditoria": agente}), encoding="utf-8"
+        )
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "config auditor"], cwd=repo,
+                       check=True, capture_output=True)
+
+    def _debatir(self, c):
+        c.post("/api/debates", json=CONFIG)
+        for _ in range(100):
+            if not c.get("/api/estado").json()["corriendo"]:
+                return
+            time.sleep(0.05)
+        pytest.fail("el debate no terminó")
+
+    def _ejecutar(self, c, auditar):
+        self._debatir(c)
+        nombre = c.get("/api/transcripts").json()["transcripts"][0]
+        with c.websocket_connect("/ws") as ws:
+            ws.receive_json()
+            c.post("/api/ejecutar", json={"transcript": nombre, "auditar": auditar})
+            for _ in range(60):
+                msg = ws.receive_json()
+                if msg["tipo"] == "ejecucion_fin":
+                    return msg
+                if msg["tipo"] == "ejecucion_error":
+                    pytest.fail(msg["mensaje"])
+        pytest.fail("la ejecución no terminó")
+
+    def test_desviado_bloquea_commit_y_forzar_lo_permite(self, git_repo):
+        self._con_auditoria(git_repo)
+        auditor = _AuditorStub(_BLOQUE_DESVIADO)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor(),
+                        auditor_ejecucion=auditor)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            fin = self._ejecutar(c, auditar=True)
+            assert auditor.invocado
+            assert fin["auditoria"]["veredicto"] == "desviado"
+            # El veredicto también viaja a la vista de pendiente.
+            pend = c.get("/api/ejecucion-pendiente").json()["pendiente"]
+            assert pend["auditoria"]["veredicto"] == "desviado"
+            # Sin forzar: bloqueado.
+            r = c.post("/api/commit", json={"mensaje": "no debería"})
+            assert r.status_code == 409 and "DESVIADA" in r.json()["detail"]
+            # Con forzar: el vocero asume el desvío y pasa.
+            r2 = c.post("/api/commit", json={"mensaje": "asumo el desvío", "forzar": True})
+            assert r2.status_code == 200 and r2.json()["sha"]
+
+    def test_conforme_no_bloquea(self, git_repo):
+        self._con_auditoria(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor(),
+                        auditor_ejecucion=_AuditorStub(_BLOQUE_CONFORME))
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            fin = self._ejecutar(c, auditar=True)
+            assert fin["auditoria"]["veredicto"] == "conforme"
+            assert c.post("/api/commit", json={"mensaje": "ok"}).status_code == 200
+
+    def test_json_roto_no_bloquea(self, git_repo):
+        # Fallback acordado: un auditor ilegible no es evidencia de desvío.
+        self._con_auditoria(git_repo)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor(),
+                        auditor_ejecucion=_AuditorStub("no emití bloque alguno"))
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            fin = self._ejecutar(c, auditar=True)
+            assert fin["auditoria"]["veredicto"] == "desconocido"
+            assert c.post("/api/commit", json={"mensaje": "ok"}).status_code == 200
+
+    def test_sin_opt_in_no_corre_el_auditor(self, git_repo):
+        self._con_auditoria(git_repo)
+        auditor = _AuditorStub(_BLOQUE_DESVIADO)
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor(),
+                        auditor_ejecucion=auditor)
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            fin = self._ejecutar(c, auditar=False)
+            assert not auditor.invocado and fin["auditoria"] == {}
+            # Sin auditar, el commit no se bloquea aunque el stub diría desviado.
+            assert c.post("/api/commit", json={"mensaje": "ok"}).status_code == 200
+
+    def test_auditar_sin_config_es_422(self, git_repo):
+        # Opt-in sin agente configurado: error de config, no fallback silencioso.
+        import subprocess
+        (git_repo / ".gitignore").write_text("transcripts/\n.devvating/\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "sin auditoria"], cwd=git_repo,
+                       check=True, capture_output=True)
+        carpeta = git_repo / "transcripts"
+        carpeta.mkdir(exist_ok=True)
+        nombre = "20260720-000000-plan.json"
+        (carpeta / nombre).write_text(json.dumps({
+            "topic": {"prompt": "tema"}, "synthesis": "un plan", "decisiones": [],
+        }), encoding="utf-8")
+        app = crear_app(repo=str(git_repo), fabrica_par=_fabrica_stub,
+                        backend_ejecucion=_BackendEscritor())
+        with TestClient(app) as c:
+            c.headers["X-Devvating-CSRF"] = app.state.csrf_token
+            r = c.post("/api/ejecutar", json={"transcript": nombre, "auditar": True})
+            assert r.status_code == 422 and "auditoria" in r.json()["detail"]
+
+
 class TestCierrePlan:
     def test_reusa_turnos_y_corre_una_ronda_con_las_decisiones(self, tmp_path):
         # Fabrica del cierre: los turnos 0 y 1 se reusan del transcript; los

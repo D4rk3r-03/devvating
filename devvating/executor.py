@@ -22,6 +22,7 @@ from typing import Callable, Protocol, runtime_checkable
 
 from . import gitutil
 from .adapters.cli import env_suscripcion
+from .auditor import AuditorBackend, auditar
 
 
 class ExecutorError(RuntimeError):
@@ -82,6 +83,10 @@ class ExecutionOutcome:
     # Cruce determinista plan↔diff (ver `correspondencia`). Señal para el
     # vocero, no veredicto: nadie bloquea por esto todavía.
     correspondencia: dict = field(default_factory=dict)
+    # D16 — veredicto del auditor por modelo (ver auditor.py). Vacío = no se
+    # pidió auditoría. A diferencia de `correspondencia`, un veredicto
+    # "desviado" SÍ bloquea el commit por defecto (con escape del vocero).
+    auditoria: dict = field(default_factory=dict)
 
 
 EventCb = Callable[[str, str], None]
@@ -252,6 +257,7 @@ class Executor:
         allow_commands: bool = False,
         branch: str | None = None,
         verify_command: str | None = None,
+        auditor_backend: AuditorBackend | None = None,
         allow_open_decisions: bool = False,
     ) -> ExecutionOutcome:
         if not gitutil.is_git_repo(self.repo):
@@ -348,6 +354,17 @@ class Executor:
             else:
                 self._on_event("verificacion_ok", "")
 
+        # Auditoría de correspondencia (D16): corre DESPUÉS de la verificación y
+        # de su posible corrección, sobre el diff FINAL — audita lo que quedará
+        # en staging, no un estado intermedio. Solo si el vocero la pidió
+        # (auditor_backend). Un veredicto "desviado" bloqueará el commit; el
+        # fallback (no legible) queda "desconocido" y no bloquea.
+        auditoria: dict = {}
+        if auditor_backend is not None:
+            self._on_event("auditando", auditor_backend.name)
+            auditoria = auditar(auditor_backend, plan.text, diff, worktree)
+            self._on_event("auditoria_lista", auditoria.get("veredicto", ""))
+
         # Sidecar definitivo: ya se sabe cómo terminó. `returncode` es el dato
         # que git no puede dar y que decide si el Hub deja commitear.
         gitutil.escribir_sidecar(worktree, {
@@ -359,6 +376,7 @@ class Executor:
             "returncode": code,
             "verify_returncode": verify_returncode,
             "correspondencia": corresp,
+            "auditoria": auditoria,
             "terminado": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
 
@@ -377,6 +395,7 @@ class Executor:
             verify_output=verify_output,
             verify_corrected=verify_corrected,
             correspondencia=corresp,
+            auditoria=auditoria,
         )
 
     def _run_verify(self, command: str, cwd: str) -> tuple[int, str]:

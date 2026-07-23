@@ -12,13 +12,19 @@ class TestProjectConfig:
     def test_sin_archivo_usa_defaults(self, tmp_path):
         pc = ProjectConfig.load(str(tmp_path))
         assert pc.rounds == 2 and pc.auto_rotate and not pc.deep_mode
-        assert pc.verificacion == ""
+        assert pc.verificacion == "" and pc.auditoria == ""
 
     def test_lee_el_comando_de_verificacion(self, tmp_path):
         (tmp_path / ".devvating.json").write_text(
             json.dumps({"verificacion": "pytest -q"}), encoding="utf-8"
         )
         assert ProjectConfig.load(str(tmp_path)).verificacion == "pytest -q"
+
+    def test_lee_el_agente_auditor(self, tmp_path):
+        (tmp_path / ".devvating.json").write_text(
+            json.dumps({"auditoria": "claude-cli"}), encoding="utf-8"
+        )
+        assert ProjectConfig.load(str(tmp_path)).auditoria == "claude-cli"
 
     def test_lee_valores_del_archivo(self, tmp_path):
         (tmp_path / ".devvating.json").write_text(

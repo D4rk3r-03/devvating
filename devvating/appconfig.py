@@ -43,6 +43,12 @@ class ProjectConfig:
     # por estar aquí: exige opt-in explícito del vocero en cada ejecución
     # (mismo régimen que --allow-commands, protocolo 5) — ver ejecutar.py.
     verificacion: str = ""
+    # D16 — auditor de correspondencia de fase 5. NOMBRA un agente de roster que
+    # audita, en solo lectura, si el diff hace lo que el plan pidió (ver
+    # auditor.py). Mismo régimen de opt-in que `verificacion`: presente aquí NO
+    # significa que corra — cada ejecución debe activarlo explícitamente. Vacío =
+    # sin auditoría (comportamiento clásico).
+    auditoria: str = ""
 
     @classmethod
     def load(cls, start: str = ".") -> "ProjectConfig":
@@ -68,6 +74,7 @@ class ProjectConfig:
                 agentes=agentes,
                 sesgos=sesgos,
                 verificacion=str(data.get("verificacion", "")),
+                auditoria=str(data.get("auditoria", "")),
             )
         except (OSError, ValueError, TypeError, AttributeError):
             return cls()

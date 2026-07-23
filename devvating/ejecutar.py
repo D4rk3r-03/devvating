@@ -29,6 +29,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 from .appconfig import ProjectConfig
+from .auditor import crear_auditor
 from .executor import (
     ClaudeCodeBackend,
     Executor,
@@ -88,6 +89,14 @@ def main(argv: list[str] | None = None) -> int:
              "'verificacion' de .devvating.json; si falla, intenta UNA "
              "corrección acotada y reporta el resultado. El comando viene del "
              "repo objetivo: exige confirmación aparte de --yes — PELIGROSO.",
+    )
+    parser.add_argument(
+        "--auditar",
+        action="store_true",
+        help="Fase 5 (D16): tras aplicar el plan, un agente auditor "
+             "(read-only, nombre en 'auditoria' de .devvating.json) revisa si "
+             "el diff hace lo que el plan pidió. Un veredicto 'desviado' NO "
+             "detiene la CLI, pero se reporta y bloquearía el commit en el Hub.",
     )
     args = parser.parse_args(argv)
 
@@ -169,6 +178,24 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 console.print("Verificación omitida por el vocero.")
 
+    # Auditoría (fase 5, D16): read-only, así que no exige el ritual de
+    # confirmación de --verificar (que sí corre un comando del repo). El agente
+    # sale de 'auditoria' en .devvating.json; sin él, --auditar se omite.
+    auditor_backend = None
+    if args.auditar:
+        pc_aud = ProjectConfig.load(args.repo)
+        if not pc_aud.auditoria:
+            console.print(
+                "[yellow]--auditar activado, pero '.devvating.json' no trae "
+                "'auditoria'; se omite.[/yellow]"
+            )
+        else:
+            try:
+                auditor_backend = crear_auditor(pc_aud.auditoria)
+            except ValueError as exc:
+                console.print(f"[red]{exc}[/red]")
+                return 1
+
     executor = Executor(
         args.repo,
         backend,
@@ -179,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome = executor.execute(
             plan, allow_commands=args.allow_commands, branch=args.branch,
             verify_command=verify_command,
+            auditor_backend=auditor_backend,
             allow_open_decisions=args.allow_open_decisions,
         )
     except ExecutorError as exc:
@@ -216,6 +244,31 @@ def main(argv: list[str] | None = None) -> int:
             console.print(Syntax(
                 outcome.verify_output, "text", theme="ansi_dark", word_wrap=True
             ))
+
+    if outcome.auditoria:
+        console.rule("[bold]Auditoría de correspondencia (fase 5)")
+        veredicto = outcome.auditoria.get("veredicto", "desconocido")
+        if veredicto == "conforme":
+            console.print("[green]✓ Auditor: el diff corresponde al plan.[/green]")
+        elif veredicto == "desviado":
+            console.print(
+                "[red]✗ Auditor: la ejecución se DESVIÓ del plan. "
+                f"{outcome.auditoria.get('resumen', '')}[/red]"
+            )
+            for h in outcome.auditoria.get("no_pedido", []):
+                marca = "" if h.get("cita_localizada") else " [dim](cita no localizada en el diff)[/dim]"
+                console.print(f"  • No pedido: {h.get('que', '')}{marca}")
+            for h in outcome.auditoria.get("omitido", []):
+                console.print(f"  • Omitido: {h.get('que', '')}")
+            console.print(
+                "[dim]La CLI no detiene por esto; en el Hub este veredicto "
+                "bloquearía el commit salvo forzar.[/dim]"
+            )
+        else:
+            console.print(
+                "[yellow]Auditor sin veredicto legible: no se pudo auditar "
+                "(no bloquea).[/yellow]"
+            )
 
     # El plan se aplicó en un worktree aislado, no en el árbol del vocero: las
     # instrucciones tienen que apuntar ahí, o el vocero busca sus cambios donde

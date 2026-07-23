@@ -32,11 +32,13 @@ class _StubExecutor:
         self.repo = repo
         self.backend = backend
         self.verify_command_recibido: str | None = "__no_llamado__"
+        self.auditor_backend_recibido = "__no_llamado__"
         _StubExecutor.ultima_instancia = self
 
     def execute(self, plan, *, allow_commands=False, branch=None, verify_command=None,
-                allow_open_decisions=False):
+                auditor_backend=None, allow_open_decisions=False):
         self.verify_command_recibido = verify_command
+        self.auditor_backend_recibido = auditor_backend
         self.allow_open_decisions_recibido = allow_open_decisions
         return ExecutionOutcome(
             branch=branch or "devvating/test",
@@ -164,3 +166,55 @@ class TestConfirmacionDeVerificar:
         )
         assert rc == 0
         assert _StubExecutor.ultima_instancia.verify_command_recibido is None
+
+
+def _con_auditoria(git_repo, agente: str = "claude"):
+    (git_repo / ".devvating.json").write_text(
+        json.dumps({"auditoria": agente}), encoding="utf-8"
+    )
+
+
+class TestAuditarCLI:
+    """--auditar (D16): read-only, sin ritual de confirmación aparte (a
+    diferencia de --verificar, que corre un comando del repo)."""
+
+    def test_sin_flag_no_pasa_auditor(self, git_repo, tmp_path, monkeypatch):
+        _con_auditoria(git_repo)
+        _preparar(monkeypatch, respuestas=[])
+        rc = ejecutar.main(
+            ["--repo", str(git_repo), "--plan-file", str(_plan_file(tmp_path)), "--yes"]
+        )
+        assert rc == 0
+        assert _StubExecutor.ultima_instancia.auditor_backend_recibido is None
+
+    def test_con_flag_y_config_pasa_auditor(self, git_repo, tmp_path, monkeypatch):
+        from devvating.auditor import ClaudeAuditBackend
+
+        _con_auditoria(git_repo, "claude-cli")
+        _preparar(monkeypatch, respuestas=[])  # read-only: no pregunta nada
+        rc = ejecutar.main(
+            ["--repo", str(git_repo), "--plan-file", str(_plan_file(tmp_path)),
+             "--yes", "--auditar"]
+        )
+        assert rc == 0
+        assert isinstance(
+            _StubExecutor.ultima_instancia.auditor_backend_recibido, ClaudeAuditBackend
+        )
+
+    def test_flag_sin_config_omite_sin_fallar(self, git_repo, tmp_path, monkeypatch):
+        _preparar(monkeypatch, respuestas=[])
+        rc = ejecutar.main(
+            ["--repo", str(git_repo), "--plan-file", str(_plan_file(tmp_path)),
+             "--yes", "--auditar"]
+        )
+        assert rc == 0
+        assert _StubExecutor.ultima_instancia.auditor_backend_recibido is None
+
+    def test_auditor_no_soportado_falla_con_mensaje(self, git_repo, tmp_path, monkeypatch):
+        _con_auditoria(git_repo, "antigravity")
+        _preparar(monkeypatch, respuestas=[])
+        rc = ejecutar.main(
+            ["--repo", str(git_repo), "--plan-file", str(_plan_file(tmp_path)),
+             "--yes", "--auditar"]
+        )
+        assert rc == 1  # error de config: no ejecuta a ciegas

@@ -152,6 +152,38 @@ SINTETIZADOR = (
     "- El bloque va solo al final; no lo comentes ni lo repitas."
 )
 
+AUDITOR = (
+    "Eres el AUDITOR de correspondencia de una ejecución de código. Se te da un "
+    "PLAN aprobado y el DIFF de lo que un agente ejecutor aplicó en su nombre. "
+    "Tu trabajo NO es validar que todo salió bien: es lo contrario. Con la carga "
+    "de la prueba INVERTIDA, busca y reporta SOLO dos cosas:\n"
+    "  1. Lo que se HIZO y el plan NO pidió (cambios fuera de alcance).\n"
+    "  2. Lo que el plan PIDIÓ y NO se hizo (omisiones).\n"
+    "No enumeres lo que sí coincide ni felicites la ejecución: si un cambio está "
+    "en el plan y en el diff, no lo menciones. Ancla en el código real con Read/"
+    "Glob/Grep si necesitas contexto, pero tu evidencia sale del DIFF.\n\n"
+    "CADA hallazgo del tipo 1 DEBE incluir una CITA textual del diff (una línea "
+    "o fragmento copiado literalmente, entre «comillas angulares»); sin cita "
+    "verificable, no lo reportes — una sospecha sin fragmento no es un hallazgo. "
+    "Cada hallazgo del tipo 2 cita el fragmento del PLAN que quedó incumplido.\n\n"
+    "El veredicto es 'desviado' si encuentras AL MENOS un hallazgo real de "
+    "cualquiera de los dos tipos; 'conforme' solo si el diff hace exactamente lo "
+    "que el plan pidió, ni más ni menos. Ante la duda entre ambos, ninguna "
+    "presión te obliga a declarar 'conforme': prefiere señalar.\n\n"
+    "Responde en español. Al FINAL de todo, en UNA sola línea y sin nada "
+    "después, emite un bloque JSON COMPACTO con formato EXACTO:\n"
+    '{"auditoria":{"veredicto":"conforme|desviado","no_pedido":[{"que":"…",'
+    '"cita":"«fragmento textual del diff»"}],"omitido":[{"que":"…","cita":'
+    '"«fragmento del plan incumplido»"}],"resumen":"…"}}\n'
+    "Reglas del bloque:\n"
+    "- 'no_pedido' y 'omitido' son listas; vacías si no hay hallazgos de ese "
+    "tipo (con ambas vacías, el veredicto es 'conforme').\n"
+    "- 'cita' lleva un fragmento TEXTUAL entre «comillas angulares», copiado tal "
+    "cual para que sea verificable contra el diff.\n"
+    "- 'resumen' es una frase corta para el vocero.\n"
+    "- El bloque va solo al final; no lo comentes ni lo repitas."
+)
+
 # --- Constructores de prompt por fase ----------------------------------------
 
 
@@ -210,4 +242,18 @@ def prompt_sintesis(topic: "DebateTopic", transcripcion: str, nota_convergencia:
         f"ESTADO DE CONVERGENCIA: {nota_convergencia}\n\n"
         f"TRANSCRIPCIÓN DEL DEBATE:\n{transcripcion}\n\n"
         "Produce la síntesis en el formato indicado."
+    )
+
+
+def prompt_auditoria(plan_text: str, diff: str) -> str:
+    """Prompt del auditor: el plan aprobado y el diff de lo ejecutado.
+
+    El diff es la evidencia de lo que se HIZO; el worktree está a mano (Read/
+    Glob/Grep) para contexto, pero el veredicto se ancla en el diff."""
+    return (
+        "PLAN APROBADO (lo que se pidió):\n"
+        f"{plan_text}\n\n"
+        "DIFF DE LO EJECUTADO (lo que el agente aplicó, en staging):\n"
+        f"{diff}\n\n"
+        "Audita la correspondencia según tu papel y emite tu veredicto."
     )

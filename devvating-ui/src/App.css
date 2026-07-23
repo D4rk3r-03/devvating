@@ -601,3 +601,39 @@ pre.diff .hunk { color: var(--accent); }
   background: color-mix(in srgb, var(--warning) 9%, transparent);
 }
 .aviso-correspondencia svg { flex-shrink: 0; margin-top: .15rem; }
+
+/* Veredicto del auditor (D16). "desviado" bloquea el commit; se pinta como
+   error, no como aviso, para distinguirlo de la correspondencia (que no
+   bloquea). "conforme" en verde. */
+.aviso-auditoria {
+  display: flex; flex-direction: column; gap: .3rem;
+  padding: .55rem .7rem; margin: .5rem 0 .8rem;
+  font-size: .82rem; line-height: 1.4; border-radius: 6px;
+  color: var(--text-muted);
+  border-left: 3px solid var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+}
+.aviso-auditoria.desviado {
+  color: var(--danger, #e5484d);
+  border-left-color: var(--danger, #e5484d);
+  background: color-mix(in srgb, var(--danger, #e5484d) 9%, transparent);
+}
+.aviso-auditoria.conforme {
+  flex-direction: row; align-items: center; gap: .45rem;
+  color: var(--success);
+  border-left-color: var(--success);
+  background: color-mix(in srgb, var(--success) 9%, transparent);
+}
+.aviso-auditoria svg { flex-shrink: 0; }
+.aviso-auditoria ul { margin: .1rem 0 .1rem 1.1rem; padding: 0; }
+.aviso-auditoria li { margin: .1rem 0; }
+.aviso-auditoria em { opacity: .75; font-style: italic; }
+.fila-cierre .commit.forzar { background: var(--warning); }
+
+/* Opt-in de auditoría junto a "Ejecutar plan". */
+.opt-auditar {
+  display: inline-flex; align-items: center; gap: .3rem;
+  font-size: .8rem; color: var(--text-muted); cursor: pointer;
+  user-select: none;
+}
+.opt-auditar input { cursor: pointer; }

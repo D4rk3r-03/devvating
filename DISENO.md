@@ -770,20 +770,36 @@ correcciones de claude diciendo "no tengo más objeciones"). Diseño acordado:
    Coste cero, sin alucinación posible. **Implementada.** Verificada contra los
    dos casos reales: marca la ejecución mala y NO marca la buena.
 2. **Auditor: tercero limpio** — ni el ejecutor (se autoevaluaría) ni un
-   debatiente (llega con postura). Mismo `HeadlessBackend`, `--allowedTools
-   Read,Glob,Grep`. *Pendiente.*
-3. **Anti-complacencia** — invertir la carga de la prueba (pedirle listar solo
-   lo no solicitado y lo omitido, no "validar") **más** exigirle cita textual
-   verificable contra el diff, al estilo de `_cita_localizada`: invertir la
-   carga sin verificar solo cambia la dirección del sesgo. *Pendiente.*
+   debatiente (llega con postura). Es un agente de ROSTER, opt-in por ejecución
+   (campo `auditoria` en `.devvating.json`, mismo régimen que `verificacion`),
+   NO un modelo de alto razonamiento cableado (arbitrado por el vocero). Corre
+   por el camino headless read-only (`auditor.ClaudeAuditBackend`,
+   `--allowedTools Read,Glob,Grep`) sobre el worktree ya ejecutado, no el bucle
+   de debate. **Implementado.**
+3. **Anti-complacencia** — el rol `AUDITOR` (`roles.py`) invierte la carga de la
+   prueba (listar solo lo no solicitado y lo omitido, no "validar") **y** exige
+   cita textual verificable contra el diff. La localización de citas
+   (`auditor._cita_en_diff`, al estilo de `_cita_localizada`) es una SEÑAL
+   blanda que se muestra al vocero, no cambia el veredicto: no reemplazamos el
+   juicio del auditor por una heurística, el vocero tiene el escape.
+   **Implementado.**
 4. **Efecto: bloqueo blando con escape explícito**, como el gate de decisiones
-   (409 + `forzar`). *Pendiente.*
+   (409 + `forzar`). El predicado único `auditor.bloquea()` (solo `"desviado"`
+   bloquea) lo comparten CLI y Hub. **Implementado.**
 5. **Fallback = NO bloquear.** Un JSON roto del auditor es un fallo SUYO, no
    evidencia contra el diff; bloquear ahí castiga trabajo bueno por un error de
    formato de un tercero. Coherente con `_parse_verdict` → `None` y
-   `_parse_decisiones` → `[]`.
+   `_parse_decisiones` → `[]`. `parse_auditoria` cae a `None` y el veredicto
+   queda `"desconocido"`, que no bloquea. **Implementado.**
 
 La guarda determinista es una SEÑAL, no un veredicto: un plan puede nombrar
 archivos que solo cita, y una ejecución legítima puede tocar algo que el plan
 no nombró. Se muestra junto al diff, que es donde el vocero decide, y viaja en
 el sidecar para sobrevivir a un reinicio.
+
+El veredicto del auditor también viaja en el sidecar (`auditoria`), así que un
+`"desviado"` sigue bloqueando el commit tras un reinicio del Hub. Soportado hoy
+solo por la familia claude como auditor; otros agentes de roster como auditor
+están diseñados y pendientes (un nombre no soportado es error de config, no
+fallback silencioso). El Hub expone la auditoría opt-in (checkbox «auditar») y,
+ante `"desviado"`, ofrece «Commit asumiendo el desvío» (el `forzar`).
